@@ -1,0 +1,8 @@
+# rcfm
+ipython
+fastparquet
+pandas
+numpy
+numpy-financial
+pyarrow
+schwab-py
