@@ -11,56 +11,79 @@ import types
 import lmidb
 
 
+def compute_all_account_positions(cursor: sqlite3.Cursor) -> None:
+    # Get all accounts from the database
+    cursor.execute("SELECT id, name, number, owner FROM accounts")
+    accounts = cursor.fetchall()
+
+    for account in accounts:
+        account_id = account["id"]
+        account_name = account["name"]
+
+        print(f"Computing positions for account: {account_name} (ID: {account_id})")
+
+        positions = compute_account_positions(cursor, account_id)
+        print(positions)
+
+
 def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.DataFrame:
-    """Compute positions for given account for each month covered by the transactions."""
+    """Compute positions for given account for day there are transactions."""
+    global dtis, dtie, positions, latest_position_df, months, symbols
 
-    # first get all tickers that have been in this account
-    # next get the final positions for all tickers that have been in this account
-    # propigate backwards the positions
+    cursor.execute(f"SELECT MIN(Date) as first_date, MAX(Date) as last_date FROM transactions_{account_id}")
+    result = cursor.fetchone()
+    first_transaction_date = dt.datetime.fromisoformat(result["first_date"])
+    latest_transaction_date = dt.datetime.fromisoformat(result["last_date"])
 
-    symbols = [s for s in transactions["Symbol"].unique() if s != ""]
-    symbols.append(lmidb.cash)  # dummy symbol for cash
+    cursor.execute(
+        f"""
+        SELECT * FROM positions_{account_id} 
+        WHERE Date = (SELECT MAX(Date) FROM positions_{account_id})
+    """
+    )
+    latest_position_df = pd.DataFrame([dict(row) for row in cursor])
+    latest_position_date = dt.datetime.fromisoformat(latest_position_df["date"][0])
+    print(latest_position_date)
+    print(latest_position_df)
 
-    fpd = final_positions.iloc[0]["Date"]
-    ftd = transactions.iloc[0]["Date"]
-    fd = max(fpd, ftd)
-    sd = transactions.iloc[-1]["Date"]
-    sd = dt.date(sd.year, sd.month, 1)
-    dtis = pd.Series(pd.date_range(start=sd, end=fd, freq="MS").date)
-    dtie = list(pd.date_range(start=sd, end=fd, freq="ME").date)
-    if dtie[-1].month < fd.month:
-        dtie.append(fd)
+    # start dataframe with the oldest transaction
+    start_date = dt.date(first_transaction_date.year, first_transaction_date.month, 1)
+    # end with the most recent position
+    dtis = pd.Series(pd.date_range(start=start_date, end=latest_position_date, freq="MS").date)
+    dtie = list(pd.date_range(start=start_date, end=latest_position_date, freq="ME").date)
+    print(dtie[-1])
+    if dtie[-1] < latest_position_date.date():
+        dtie.append(latest_position_date.date())
     dtie = pd.Series(dtie)
+
+    symbols = lmidb.get_securities_in_account(cursor, account_id)
     positions = pd.DataFrame(index=dtie, columns=symbols)
 
-    positions.loc[fd] = 0
-    for i, r in final_positions.iterrows():
-        symbol = r["Symbol"]
-        if symbol == "Account Total":
-            continue
-        if symbol == "Cash & Cash Investments":
-            symbol = lmidb.cash
-            qty = fns_to_float(r["Mkt Val (Market Value)"])
-        else:
-            qty = fns_to_float(r["Qty (Quantity)"])
-        positions.loc[fd, symbol] = qty
+    # initialize the end of positions datafrom with the latest position data
+    positions.loc[dtie.iloc[-1]] = 0
+    for i, r in latest_position_df.iterrows():
+        positions.loc[dtie.iloc[-1], r["symbol"]] = r["quantity"]
+
+    cash = positions.columns[positions.columns.get_loc(lmidb.cash)]
 
     # start of month, end of month, and end of previous month
     months = pd.concat([dtis, dtie, dtie.shift(1)], axis=1)[::-1]
     for i, m in months.iterrows():
-        # print(f"m0:{m[0]}, m1:{m[1]}, m2:{m[2]}")
+        print(f"m0:{m[0]}, m1:{m[1]}, m2:{m[2]}")
         if m[2] == None:
             break
         positions.loc[m[2]] = positions.loc[m[1]]
-        t_month = transactions[(transactions["Date"] >= m[0]) & (transactions["Date"] <= m[1])]
-        # print(f"transactions:\n{t_month}")
 
-        for j, t in t_month.iterrows():
+        cursor.execute(
+            f"SELECT * FROM transactions_{account_id} WHERE Date >= ? AND Date <= ? ORDER BY Date DESC",
+            (m[0].isoformat(), m[1].isoformat()),
+        )
+
+        for t in cursor:
             action = t["Action"]
             symbol = t["Symbol"]
             quantity = float(t["Quantity"])
             amount = float(t["Amount"])
-            p = positions.loc[m[2]]
 
             # The sign is reversed on transactions because we are going backwards in time
             # Have verified this algo on jon-ira back to Dec 2021
@@ -71,11 +94,11 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
                 print("Handle journal")
                 sys.exit(-1)
             elif action == "Reinvest Shares":
-                p[symbol] -= quantity
-                p[cash] += amount
+                positions.loc[m[2], symbol] -= quantity
+                positions.loc[m[2], cash] += amount
             elif action == "Reinvestment Adj":
-                p[symbol] += quantity
-                p[cash] += amount
+                positions.loc[m[2], symbol] += quantity
+                positions.loc[m[2], cash] += amount
             elif action in [
                 "Reinvest Dividend",
                 "Long Term Cap Gain Reinvest",
@@ -85,13 +108,13 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
                 "Short Term Cap Gain",
                 "Long Term Cap Gain",
             ]:
-                p[cash] += amount
+                positions.loc[m[2], cash] += amount
             elif action == "Buy":
-                p[symbol] -= quantity
-                p[cash] -= amount
+                positions.loc[m[2], symbol] -= quantity
+                positions.loc[m[2], cash] -= amount
             elif action == "Sell":
-                p[symbol] += quantity
-                p[cash] -= amount
+                positions.loc[m[2], symbol] += quantity
+                positions.loc[m[2], cash] -= amount
             elif action in [
                 "Bank Interest",
                 "Cash Dividend",
@@ -100,9 +123,9 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
                 "Advisor Fee Adj",
                 "Special Dividend",
             ]:
-                p[cash] -= amount
+                positions.loc[m[2], cash] -= amount
             elif action in ["MoneyLink Transfer", "Wire Sent"]:
-                p[cash] += amount
+                positions.loc[m[2], cash] += amount
             else:
                 print(f"Unhandled action: i:{i}, action:{action}")
 
@@ -186,10 +209,11 @@ def main():
         metavar="dir",
         help="Directory to get shwab transactions and positions from. (default: %(default)s)",
     )
+    parser.add_argument("--add-old", action="store_true", default=False, help="Add old/historical data when updating.")
     parser.add_argument(
         "action",
         type=str,
-        choices=["update-db", "dump-db", "statement", "roi", "update-candles"],
+        choices=["update-db", "dump-db", "statement", "roi", "update-candles", "compute-positions"],
         help="Action to take.",
     )
     args = parser.parse_args()
@@ -206,19 +230,22 @@ def main():
         conn = sqlite3.connect(fn)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
+    global cursor
     cursor = conn.cursor()
 
     match args.action:
         case "dump-db":
             lmidb.dump_summary(cursor)
         case "update-db":
-            lmidb.update_db(cursor, args.schwab_data)
+            lmidb.update_db(cursor, args.schwab_data, args.add_old)
         case "update-candles":
             lmidb.update_candles(cursor)
         case "statement":
             statement(cursor)
         case "roi":
             roi(cursor)
+        case "compute-positions":
+            compute_all_account_positions(cursor)
         case _:
             print("inconcievable")
 

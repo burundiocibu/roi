@@ -6,7 +6,6 @@ a sqlite db and functions to populate it from data from schwab
 
 import csv
 import datetime as dt
-import os
 import pandas as pd
 from pathlib import Path
 import re
@@ -132,7 +131,7 @@ def fns_to_float(v: str) -> float:
         return float(vv)
 
 
-def update_schwab_transactions(fn: Path, account_id: int, cursor: sqlite3.Cursor):
+def update_schwab_transactions(fn: Path, account_id: int, cursor: sqlite3.Cursor, add_old=False) -> None:
     """
     Reads schwab exported transactions .csv files and adds them to the database, optimized for date-sorted input.
     """
@@ -147,7 +146,7 @@ def update_schwab_transactions(fn: Path, account_id: int, cursor: sqlite3.Cursor
         new_transactions = 0
         for row in reader:
             date = pd.to_datetime(row["Date"][0:10])
-            if latest_db_date and date <= pd.to_datetime(latest_db_date):
+            if not add_old and latest_db_date and date <= pd.to_datetime(latest_db_date):
                 continue  # Skip, already in DB
             action = row["Action"]
             symbol = row["Symbol"]
@@ -201,13 +200,13 @@ def update_schwab_transactions(fn: Path, account_id: int, cursor: sqlite3.Cursor
                         amount,
                     )
             else:
-                print("interesting, transaction already exists, skipping insert")
+                if not add_old:
+                    print("interesting, transaction already exists, skipping insert")
     cursor.connection.commit()
-    if new_transactions > 0:
-        print(f"Added {new_transactions} new transactions from {fn}")
+    print(f"Added {new_transactions} new transactions from {fn}")
 
 
-def update_all_schwab_transactions_from_dir(directory: Path, cursor: sqlite3.Cursor):
+def update_all_schwab_transactions_from_dir(directory: Path, cursor: sqlite3.Cursor, add_old=False):
     """
     Iterates through given directory, finds Schwab transactions CSVs,
     extracts owner and account info, ensures accounts are present, and imports transactions.
@@ -227,12 +226,7 @@ def update_all_schwab_transactions_from_dir(directory: Path, cursor: sqlite3.Cur
             add_account(cursor, account_number, account_name, owner)
             account_id = get_account_id_by_number(cursor, account_number)
 
-        update_schwab_transactions(file, account_id, cursor)  # type: ignore
-
-
-def get_transactions(cursor: sqlite3.Cursor, account_id: int):
-    cursor.execute(f"SELECT * FROM transactions_{account_id}")
-    return [row[0] for row in cursor.fetchall()]
+        update_schwab_transactions(file, account_id, cursor, add_old)  # type: ignore
 
 
 def update_schwab_positions(fn: Path, account_id: int, cursor: sqlite3.Cursor) -> None:
@@ -383,19 +377,21 @@ def get_securities_in_account(cursor: sqlite3.Cursor, account_id: int) -> list[s
     table_name = f"transactions_{account_id}"
     try:
         cursor.execute(f"SELECT DISTINCT symbol FROM {table_name} WHERE symbol IS NOT NULL AND symbol != ''")
-        return [row[0] for row in cursor.fetchall()]
+        securities = [row[0] for row in cursor.fetchall()]
+        securities.append(cash)
+        return securities
     except sqlite3.OperationalError:
         # The transactions table does not exist for this account
         return []
 
 
-def update_db(cursor: sqlite3.Cursor, data_path: Path):
+def update_db(cursor: sqlite3.Cursor, data_path: Path, add_old=False) -> None:
     """
     Update accounts, positions, and transactions from the indicated data_path.
     """
 
     create_initial_tables(cursor)
-    update_all_schwab_transactions_from_dir(data_path, cursor)
+    update_all_schwab_transactions_from_dir(data_path, cursor, add_old)
     update_all_schwab_positions_from_dir(data_path, cursor)
 
 
@@ -413,10 +409,15 @@ def dump_summary(cursor: sqlite3.Cursor):
     for acc in accounts:
         account_id = acc["id"]
         try:
-            cursor.execute(f"SELECT COUNT(*) FROM transactions_{account_id}")
-            (tx_count,) = cursor.fetchone()
+            cursor.execute(f"SELECT COUNT(*), MIN(date), MAX(date) FROM transactions_{account_id}")
+            result = cursor.fetchone()
+            tx_count = result[0]
+            tx_min_date = result[1]
+            tx_max_date = result[2]
         except sqlite3.OperationalError:
             tx_count = 0  # If the table doesn't exist
+            tx_min_date = None
+            tx_max_date = None
         # Count the number of unique position dates for this account
         table_name = f"positions_{account_id}"
         try:
@@ -424,9 +425,12 @@ def dump_summary(cursor: sqlite3.Cursor):
             unique_position_dates = cursor.fetchone()[0]
         except sqlite3.OperationalError:
             unique_position_dates = 0
-        account_info = (
-            f"{acc['name']} ({acc['number']}, owner: {acc['owner']}), transactions: {tx_count}, position: {unique_position_dates}"
-        )
+
+        tx_date_range = ""
+        if tx_min_date and tx_max_date:
+            tx_date_range = f" ({tx_min_date[:10]} to {tx_max_date[:10]})"
+
+        account_info = f"{acc['name']} ({acc['number']}, owner: {acc['owner']}), transactions: {tx_count}{tx_date_range}, position: {unique_position_dates}"
 
         table_name = f"positions_{account_id}"
         # Try to get latest date for positions in this account
