@@ -377,8 +377,7 @@ def update_schwab_positions(fn: Path, account_id: int, cursor: sqlite3.Cursor) -
             )
             new_positions += 1
     cursor.connection.commit()
-    if new_positions > 0:
-        print(f"Added {new_positions} positions from {fn}")
+    print(f"Added {new_positions} positions from {fn}")
 
 
 def update_all_schwab_positions_from_dir(directory: Path, cursor: sqlite3.Cursor, account_filter: str | None = None):
@@ -538,6 +537,80 @@ def update_db(cursor: sqlite3.Cursor, data_path: Path, add_old=False, account_fi
     update_all_schwab_positions_from_dir(data_path, cursor, account_filter)
 
 
+def print_transactions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
+    """
+    Prints all transactions for each account (or a specific account if filtered).
+    Creates a DataFrame with transaction details.
+
+    :param cursor: cursor for database connection
+    :type cursor: sqlite3.Cursor
+    :param account_filter: optional account name to filter by
+    :type account_filter: str | None
+    """
+    # Get all accounts or filter by name
+    if account_filter:
+        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
+    else:
+        cursor.execute("SELECT id, name, number, owner FROM accounts")
+    accounts = cursor.fetchall()
+
+    if not accounts and account_filter:
+        print(f"No account found with name: {account_filter}")
+        return
+
+    for acc in accounts:
+        account_id = acc["id"]
+        account_name = acc["name"]
+        account_number = acc["number"]
+        account_owner = acc["owner"]
+        table_name = f"transactions_{account_id}"
+
+        # Try to get all transactions for this account
+        try:
+            cursor.execute(
+                f"SELECT date, action, symbol, description, quantity, price, fees, amount FROM {table_name} ORDER BY date DESC"
+            )
+            rows = cursor.fetchall()
+
+            if not rows:
+                print(f"\nAccount: {account_name} ({account_number}, owner: {account_owner})")
+                print("  No transactions found.")
+                continue
+
+            # Convert to pandas DataFrame
+            data = {
+                "date": [],
+                "action": [],
+                "symbol": [],
+                "description": [],
+                "quantity": [],
+                "price": [],
+                "fees": [],
+                "amount": [],
+            }
+            for row in rows:
+                # Extract just the date part (YYYY-MM-DD) from the datetime
+                date_only = row["date"].split("T")[0] if "T" in row["date"] else row["date"].split()[0]
+                data["date"].append(date_only)
+                data["action"].append(row["action"])
+                data["symbol"].append(row["symbol"])
+                data["description"].append(row["description"])
+                data["quantity"].append(row["quantity"])
+                data["price"].append(row["price"])
+                data["fees"].append(row["fees"])
+                data["amount"].append(row["amount"])
+
+            df = pd.DataFrame(data)
+
+            print(f"\nAccount: {account_name} ({account_number}, owner: {account_owner})")
+            print(f"All Transactions ({len(df)} total):")
+            print(df.to_string(index=False))
+
+        except sqlite3.OperationalError:
+            print(f"\nAccount: {account_name} ({account_number}, owner: {account_owner})")
+            print("  No transactions table found.")
+
+
 def print_positions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
     """
     Prints all positions for each account (or a specific account if filtered).
@@ -598,6 +671,25 @@ def print_positions(cursor: sqlite3.Cursor, account_filter: str | None = None) -
         except sqlite3.OperationalError:
             print(f"\nAccount: {account_name} ({account_number}, owner: {account_owner})")
             print("  No positions table found.")
+
+
+def print_accounts(cursor: sqlite3.Cursor) -> None:
+    """
+    Prints a list of all accounts in the database.
+    """
+    cursor.execute("SELECT id, name, number, owner FROM accounts")
+    accounts = cursor.fetchall()
+
+    if not accounts:
+        print("No accounts found in database.")
+        return
+
+    print("\nAccounts:")
+    print(f"{'ID':<5} {'Name':<20} {'Number':<15} {'Owner':<15}")
+    print("-" * 60)
+    for acc in accounts:
+        print(f"{acc['id']:<5} {acc['name']:<20} {acc['number']:<15} {acc['owner']:<15}")
+    print()
 
 
 def dump_summary(cursor: sqlite3.Cursor, account_filter: str | None = None):

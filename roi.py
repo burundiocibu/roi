@@ -11,7 +11,7 @@ import types
 import lmidb
 
 
-def compute_all_account_positions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
+def compute_all_account_positions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> dict[str, pd.DataFrame]:
     # Get all accounts from the database
     if account_filter:
         cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
@@ -21,16 +21,13 @@ def compute_all_account_positions(cursor: sqlite3.Cursor, account_filter: str | 
 
     if not accounts and account_filter:
         print(f"No account found with name: {account_filter}")
-        return
+        return {}
 
+    all_positions = {}
     for account in accounts:
-        account_id = account["id"]
-        account_name = account["name"]
+        all_positions[account["name"]] = compute_account_positions(cursor, account["id"])
 
-        print(f"Computing positions for account: {account_name} (ID: {account_id})")
-
-        positions = compute_account_positions(cursor, account_id)
-        print(positions)
+    return all_positions
 
 
 def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.DataFrame:
@@ -50,15 +47,12 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
     )
     latest_position_df = pd.DataFrame([dict(row) for row in cursor])
     latest_position_date = dt.datetime.fromisoformat(latest_position_df["date"][0])
-    print(latest_position_date)
-    print(latest_position_df)
 
     # start dataframe with the oldest transaction
     start_date = dt.date(first_transaction_date.year, first_transaction_date.month, 1)
     # end with the most recent position
     dtis = pd.Series(pd.date_range(start=start_date, end=latest_position_date, freq="MS").date)
     dtie = list(pd.date_range(start=start_date, end=latest_position_date, freq="ME").date)
-    print(dtie[-1])
     if dtie[-1] < latest_position_date.date():
         dtie.append(latest_position_date.date())
     dtie = pd.Series(dtie)
@@ -73,10 +67,14 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
 
     cash = positions.columns[positions.columns.get_loc(lmidb.cash)]
 
+    debug = False
+    if debug:
+        print(f"{positions.iloc[-1].to_frame().T}")
+
     # start of month, end of month, and end of previous month
     months = pd.concat([dtis, dtie, dtie.shift(1)], axis=1)[::-1]
     for i, m in months.iterrows():
-        print(f"m0:{m[0]}, m1:{m[1]}, m2:{m[2]}")
+        # print(f"m0:{m[0]}, m1:{m[1]}, m2:{m[2]}")
         if m[2] == None:
             break
         positions.loc[m[2]] = positions.loc[m[1]]
@@ -91,51 +89,55 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
             symbol = t["Symbol"]
             quantity = float(t["Quantity"])
             amount = float(t["Amount"])
+            fees = float(t["fees"])
+            price = float(t["price"])
 
             # The sign is reversed on transactions because we are going backwards in time
             # Have verified this algo on jon-ira back to Dec 2021
-            if action == "Journal":
-                print("Handle journal")
-                sys.exit(-1)
-            elif action == "Journaled Shares":
-                print("Handle journal")
-                sys.exit(-1)
-            elif action == "Reinvest Shares":
-                positions.loc[m[2], symbol] -= quantity
-                positions.loc[m[2], cash] += amount
-            elif action == "Reinvestment Adj":
-                positions.loc[m[2], symbol] += quantity
-                positions.loc[m[2], cash] += amount
-            elif action in [
-                "Reinvest Dividend",
-                "Long Term Cap Gain Reinvest",
-                "Short Term Cap Gain Reinvest",
-                "Div Adjustment",
-                "Dividend Adj",
-                "Short Term Cap Gain",
-                "Long Term Cap Gain",
-            ]:
-                positions.loc[m[2], cash] += amount
-            elif action == "Buy":
-                positions.loc[m[2], symbol] -= quantity
-                positions.loc[m[2], cash] -= amount
-            elif action == "Sell":
-                positions.loc[m[2], symbol] += quantity
-                positions.loc[m[2], cash] -= amount
-            elif action in [
-                "Bank Interest",
-                "Cash Dividend",
-                "Bond Interest",
-                "Advisor Fee",
-                "Advisor Fee Adj",
-                "Special Dividend",
-            ]:
-                positions.loc[m[2], cash] -= amount
-            elif action in ["MoneyLink Transfer", "Wire Sent"]:
-                positions.loc[m[2], cash] += amount
-            else:
-                print(f"Unhandled action: i:{i}, action:{action}")
-
+            # fmt: off
+            match action:
+                case "Journal":
+                    print("Handle journal")
+                    sys.exit(-1)
+                case "Journaled Shares":
+                    print("Handle journal")
+                    sys.exit(-1)
+                case "Reinvest Shares":
+                    positions.loc[m[2], symbol] -= quantity
+                    positions.loc[m[2], cash] += amount
+                case "Reinvestment Adj":
+                    positions.loc[m[2], symbol] += quantity
+                    positions.loc[m[2], cash] += amount
+                case "Reinvest Dividend" | "Long Term Cap Gain Reinvest" | "Short Term Cap Gain Reinvest" | "Div Adjustment" | "Dividend Adj" | "Short Term Cap Gain" | "Long Term Cap Gain":
+                    positions.loc[m[2], cash] += amount
+                case "Buy":
+                    positions.loc[m[2], symbol] -= quantity
+                    positions.loc[m[2], cash] -= amount
+                case "Sell":
+                    positions.loc[m[2], symbol] += quantity
+                    positions.loc[m[2], cash] -= amount
+                case "Full Redemption" | "Full Redemption Adj":
+                    positions.loc[m[2], symbol] -= quantity
+                    positions.loc[m[2], cash] -= amount
+                case "Security Transfer":
+                    if symbol != "":
+                        print(f"New condition for {action} on {t['date']}")
+                    positions.loc[m[2], cash] -= amount
+                case "Bank Interest" | "Cash Dividend" | "Bond Interest" | "Advisor Fee" | "Advisor Fee Adj" | "Special Dividend" | "Funds Received":
+                    positions.loc[m[2], cash] -= amount
+                case "MoneyLink Transfer" | "Wire Sent":
+                    positions.loc[m[2], cash] -= amount
+                case "Stock Split":
+                    positions.loc[m[2], symbol] -= quantity
+                case _:
+                    print(f"Unhandled action: i:{i}")
+                    print(f"  {t['date']} {action} {symbol} {quantity} {amount} {fees} {price}")
+                    print(f"  Description: {t['description']}")
+            # fmt: off
+            if debug:
+                print(f"{t['date']} {action}, {symbol}, {quantity}, {amount}, {fees}, {price}")
+                ph = positions.loc[m[2]].to_frame().T
+                print(f"{ph}")
     return positions
 
 
@@ -196,27 +198,12 @@ def analyze(account: dict[str, pd.DataFrame], closings) -> None:
         # print(f"Transactions:\n{ty}")
 
 
-def print_accounts(cursor: sqlite3.Cursor) -> None:
-    """
-    Prints a list of all accounts in the database.
-    """
-    cursor.execute("SELECT id, name, number, owner FROM accounts")
-    accounts = cursor.fetchall()
-
-    if not accounts:
-        print("No accounts found in database.")
-        return
-
-    print("\nAccounts:")
-    print(f"{'ID':<5} {'Name':<20} {'Number':<15} {'Owner':<15}")
-    print("-" * 60)
-    for acc in accounts:
-        print(f"{acc['id']:<5} {acc['name']:<20} {acc['number']:<15} {acc['owner']:<15}")
-    print()
-
-
-def statement(cursor: sqlite3.Cursor) -> None:
-    print("tbd")
+def summary(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
+    all_positions = compute_all_account_positions(cursor, account_filter)
+    for account in all_positions.keys():
+        print(f"Account: {account}")
+        p = all_positions[account].iloc[0]
+        print(p.to_frame().T)
 
 
 def roi(cursor: sqlite3.Cursor) -> None:
@@ -243,20 +230,22 @@ def main():
         choices=[
             "update-db",
             "dump-db",
-            "statement",
+            "summary",
             "roi",
             "update-candles",
             "compute-positions",
             "print-accounts",
             "print-positions",
+            "print-transactions",
         ],
         help="Action to take.",
     )
     args = parser.parse_args()
 
     pd.options.display.float_format = "{:.2f}".format
-    pd.options.display.width = None  # type: ignore
-    # pd.options.display.max_rows = None
+    pd.options.display.max_rows = None
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", 1000)
 
     global conn
     fn = args.database
@@ -270,22 +259,27 @@ def main():
     cursor = conn.cursor()
 
     match args.action:
-        case "dump-db":
-            lmidb.dump_summary(cursor, args.account)
         case "update-db":
             lmidb.update_db(cursor, args.schwab_data, args.add_old, args.account)
         case "update-candles":
             lmidb.update_candles(cursor)
-        case "statement":
-            statement(cursor)
+        case "summary":
+            summary(cursor, args.account)
         case "roi":
             roi(cursor)
+        case "dump-db":
+            lmidb.dump_summary(cursor, args.account)
         case "compute-positions":
-            compute_all_account_positions(cursor, args.account)
+            all_positions = compute_all_account_positions(cursor, args.account)
+            for account in all_positions.keys():
+                print(f"Account: {account}")
+                print(f"{all_positions[account]}")
         case "print-accounts":
-            print_accounts(cursor)
+            lmidb.print_accounts(cursor)
         case "print-positions":
             lmidb.print_positions(cursor, args.account)
+        case "print-transactions":
+            lmidb.print_transactions(cursor, args.account)
         case _:
             print("inconcievable")
 
