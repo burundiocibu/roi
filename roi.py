@@ -11,10 +11,17 @@ import types
 import lmidb
 
 
-def compute_all_account_positions(cursor: sqlite3.Cursor) -> None:
+def compute_all_account_positions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
     # Get all accounts from the database
-    cursor.execute("SELECT id, name, number, owner FROM accounts")
+    if account_filter:
+        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
+    else:
+        cursor.execute("SELECT id, name, number, owner FROM accounts")
     accounts = cursor.fetchall()
+
+    if not accounts and account_filter:
+        print(f"No account found with name: {account_filter}")
+        return
 
     for account in accounts:
         account_id = account["id"]
@@ -189,6 +196,25 @@ def analyze(account: dict[str, pd.DataFrame], closings) -> None:
         # print(f"Transactions:\n{ty}")
 
 
+def print_accounts(cursor: sqlite3.Cursor) -> None:
+    """
+    Prints a list of all accounts in the database.
+    """
+    cursor.execute("SELECT id, name, number, owner FROM accounts")
+    accounts = cursor.fetchall()
+
+    if not accounts:
+        print("No accounts found in database.")
+        return
+
+    print("\nAccounts:")
+    print(f"{'ID':<5} {'Name':<20} {'Number':<15} {'Owner':<15}")
+    print("-" * 60)
+    for acc in accounts:
+        print(f"{acc['id']:<5} {acc['name']:<20} {acc['number']:<15} {acc['owner']:<15}")
+    print()
+
+
 def statement(cursor: sqlite3.Cursor) -> None:
     print("tbd")
 
@@ -210,17 +236,27 @@ def main():
         help="Directory to get shwab transactions and positions from. (default: %(default)s)",
     )
     parser.add_argument("--add-old", action="store_true", default=False, help="Add old/historical data when updating.")
+    parser.add_argument("--account", default=None, type=str, help="Only act on this account name. (default: act on all accounts)")
     parser.add_argument(
         "action",
         type=str,
-        choices=["update-db", "dump-db", "statement", "roi", "update-candles", "compute-positions"],
+        choices=[
+            "update-db",
+            "dump-db",
+            "statement",
+            "roi",
+            "update-candles",
+            "compute-positions",
+            "print-accounts",
+            "print-positions",
+        ],
         help="Action to take.",
     )
     args = parser.parse_args()
 
     pd.options.display.float_format = "{:.2f}".format
     pd.options.display.width = None  # type: ignore
-    pd.options.display.max_rows = None
+    # pd.options.display.max_rows = None
 
     global conn
     fn = args.database
@@ -235,9 +271,9 @@ def main():
 
     match args.action:
         case "dump-db":
-            lmidb.dump_summary(cursor)
+            lmidb.dump_summary(cursor, args.account)
         case "update-db":
-            lmidb.update_db(cursor, args.schwab_data, args.add_old)
+            lmidb.update_db(cursor, args.schwab_data, args.add_old, args.account)
         case "update-candles":
             lmidb.update_candles(cursor)
         case "statement":
@@ -245,7 +281,11 @@ def main():
         case "roi":
             roi(cursor)
         case "compute-positions":
-            compute_all_account_positions(cursor)
+            compute_all_account_positions(cursor, args.account)
+        case "print-accounts":
+            print_accounts(cursor)
+        case "print-positions":
+            lmidb.print_positions(cursor, args.account)
         case _:
             print("inconcievable")
 
