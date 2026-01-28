@@ -9,16 +9,20 @@ import sqlite3
 import lmidb
 
 
-def compute_all_history(cursor: sqlite3.Cursor, account_filter: str | None = None) -> dict:
+def compute_all_history(cursor: sqlite3.Cursor, account_filters: list[str] | None = None) -> dict:
     # Get all accounts from the database
-    if account_filter:
-        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
+    if account_filters:
+        placeholders = ",".join("?" * len(account_filters))
+        cursor.execute(
+            f"SELECT id, name, number, owner FROM accounts WHERE name IN ({placeholders})",
+            account_filters,
+        )
     else:
         cursor.execute("SELECT id, name, number, owner FROM accounts")
     accounts = cursor.fetchall()
 
-    if not accounts and account_filter:
-        print(f"No account found with name: {account_filter}")
+    if not accounts and account_filters:
+        print(f"No accounts found with names: {', '.join(account_filters)}")
         return {}
 
     global histotry
@@ -27,12 +31,12 @@ def compute_all_history(cursor: sqlite3.Cursor, account_filter: str | None = Non
     for account in accounts:
         if args.debug:
             print(f"Computing history for {account["name"]}")
-        all_history[account["name"]] = compute_account_history(cursor, account["id"])
+        all_history[account["name"]] = compute_history(cursor, account["id"])
 
     return all_history
 
 
-def compute_account_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
+def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     """Compute monthly positions, short term gains, long term gains, income, management fees, and distributions
     for the indicated account."""
 
@@ -203,11 +207,17 @@ def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
     print("tbi")
 
 
+def positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    for account, history in all_history.items():
+        print(f"Account: {account}")
+        print(f"{history["positions"]}")
+
+
 def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"Account: {account}")
-        p = history["positions"].iloc[0]
-        print(p.to_frame().T)
+        print(history["positions"].iloc[0].to_frame().T)
+        print(history["positions"].iloc[-1].to_frame().T)
 
 
 def quarterly_income(cursor: sqlite3.Cursor, all_history: dict) -> None:
@@ -249,28 +259,20 @@ def main():
     )
     parser.add_argument("-d", "--debug", action="store_true", default=False, help="Enable debug output")
     parser.add_argument(
-        "--schwab-data",
-        default=Path("schwab-data"),
-        type=Path,
-        metavar="dir",
-        help="Directory to get shwab transactions and positions from. (default: %(default)s)",
+        "--account",
+        action="append",
+        default=None,
+        type=str,
+        help="Only act on this account name. Can be specified multiple times. (default: act on all accounts)",
     )
-    parser.add_argument("--add-old", action="store_true", default=False, help="Add old/historical data when updating.")
-    parser.add_argument("--account", default=None, type=str, help="Only act on this account name. (default: act on all accounts)")
     parser.add_argument(
         "action",
         type=str,
         choices=[
+            "positions",
             "quarterly-income",
             "summary",
             "roi",
-            "update-candles",
-            "compute-history",
-            "update-db",
-            "dump-db",
-            "print-accounts",
-            "print-positions",
-            "print-transactions",
         ],
         help="Action to take.",
     )
@@ -292,31 +294,17 @@ def main():
     global cursor
     cursor = conn.cursor()
 
-    all_history = {}
-    if args.action in ["summary", "roi", "compute-history", "quarterly-income"]:
-        all_history = compute_all_history(cursor, args.account)
+    all_history = compute_all_history(cursor, args.account)
 
     match args.action:
         case "summary":
             summary(cursor, all_history)
+        case "positions":
+            positions(cursor, all_history)
         case "roi":
             roi(cursor, all_history)
         case "quarterly-income":
             quarterly_income(cursor, all_history)
-        case "compute-history":
-            pass
-        case "update-db":
-            lmidb.update_db(cursor, args.schwab_data, args.add_old, args.account)
-        case "update-candles":
-            lmidb.update_candles(cursor)
-        case "dump-db":
-            lmidb.dump_summary(cursor, args.account)
-        case "print-accounts":
-            lmidb.print_accounts(cursor)
-        case "print-positions":
-            lmidb.print_positions(cursor, args.account)
-        case "print-transactions":
-            lmidb.print_transactions(cursor, args.account)
         case _:
             print("inconcievable")
 

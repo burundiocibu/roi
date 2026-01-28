@@ -4,6 +4,7 @@ lmidb: little-mann investment database
 a sqlite db and functions to populate it from data from schwab
 """
 
+import argparse
 import csv
 import datetime as dt
 import pandas as pd
@@ -289,7 +290,10 @@ def update_schwab_transactions(fn: Path, account_id: int, cursor: sqlite3.Cursor
 
 
 def update_all_schwab_transactions_from_dir(
-    directory: Path, cursor: sqlite3.Cursor, add_old=False, account_filter: str | None = None
+    directory: Path,
+    cursor: sqlite3.Cursor,
+    add_old=False,
+    account_filters: list[str] | None = None,
 ):
     """
     Iterates through given directory, finds Schwab transactions CSVs,
@@ -301,8 +305,8 @@ def update_all_schwab_transactions_from_dir(
     :type cursor: sqlite3.Cursor
     :param add_old: if True, add historical data; if False, only add new transactions
     :type add_old: bool
-    :param account_filter: optional account name to filter by
-    :type account_filter: str | None
+    :param account_filters: optional list of account names to filter by
+    :type account_filters: list[str] | None
     """
     pattern = re.compile(r"([a-zA-Z]+)[\-_]([a-zA-Z0-9]+)_(\w+)_Transactions_\d{8}-\d{6}\.csv")
     directory = Path(directory)
@@ -313,8 +317,8 @@ def update_all_schwab_transactions_from_dir(
         owner, type, account_number = m.groups()
         account_name = f"{owner}-{type}"
 
-        # Skip if account filter is set and this account doesn't match
-        if account_filter and account_name != account_filter:
+        # Skip if account filters are set and this account doesn't match
+        if account_filters and account_name not in account_filters:
             continue
 
         # Ensure this account is present in accounts table
@@ -380,7 +384,7 @@ def update_schwab_positions(fn: Path, account_id: int, cursor: sqlite3.Cursor) -
     print(f"Added {new_positions} positions from {fn}")
 
 
-def update_all_schwab_positions_from_dir(directory: Path, cursor: sqlite3.Cursor, account_filter: str | None = None):
+def update_all_schwab_positions_from_dir(directory: Path, cursor: sqlite3.Cursor, account_filters: list[str] | None = None):
     """
     Iterates through given directory, finds Schwab positions CSVs
     with the pattern <account_name>-Positions-<YYYY-MM-DD-HHMMSS>.csv,
@@ -390,8 +394,8 @@ def update_all_schwab_positions_from_dir(directory: Path, cursor: sqlite3.Cursor
     :type directory: Path
     :param cursor: cursor for database connection
     :type cursor: sqlite3.Cursor
-    :param account_filter: optional account name to filter by
-    :type account_filter: str | None
+    :param account_filters: optional list of account names to filter by
+    :type account_filters: list[str] | None
     """
     # Regex: account name can have dashes and letters/digits; then -Positions-, then date/time
     pattern = re.compile(r"([a-zA-Z]+)[\-_]([a-zA-Z0-9]+)-Positions-\d{4}-\d{2}-\d{2}-\d{6}\.csv")
@@ -403,8 +407,8 @@ def update_all_schwab_positions_from_dir(directory: Path, cursor: sqlite3.Cursor
         owner, type = m.groups()
         account_name = f"{owner}-{type}"
 
-        # Skip if account filter is set and this account doesn't match
-        if account_filter and account_name != account_filter:
+        # Skip if account filters are set and this account doesn't match
+        if account_filters and account_name not in account_filters:
             continue
 
         # Find the account id from the name
@@ -518,7 +522,12 @@ def get_securities_in_account(cursor: sqlite3.Cursor, account_id: int) -> list[s
         return []
 
 
-def update_db(cursor: sqlite3.Cursor, data_path: Path, add_old=False, account_filter: str | None = None) -> None:
+def update_transactions(
+    cursor: sqlite3.Cursor,
+    data_path: Path,
+    add_old=False,
+    account_filters: list[str] | None = None,
+) -> None:
     """
     Update accounts, positions, and transactions from the indicated data_path.
 
@@ -528,34 +537,60 @@ def update_db(cursor: sqlite3.Cursor, data_path: Path, add_old=False, account_fi
     :type data_path: Path
     :param add_old: if True, add historical data; if False, only add new data
     :type add_old: bool
-    :param account_filter: optional account name to filter by
-    :type account_filter: str | None
+    :param account_filters: optional list of account names to filter by
+    :type account_filters: list[str] | None
     """
 
     create_initial_tables(cursor)
-    update_all_schwab_transactions_from_dir(data_path, cursor, add_old, account_filter)
-    update_all_schwab_positions_from_dir(data_path, cursor, account_filter)
+    update_all_schwab_transactions_from_dir(data_path, cursor, add_old, account_filters)
 
 
-def print_transactions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
+def update_positions(
+    cursor: sqlite3.Cursor,
+    data_path: Path,
+    add_old=False,
+    account_filters: list[str] | None = None,
+) -> None:
     """
-    Prints all transactions for each account (or a specific account if filtered).
+    Update accounts, positions, and transactions from the indicated data_path.
+
+    :param cursor: cursor for database connection
+    :type cursor: sqlite3.Cursor
+    :param data_path: directory path containing Schwab data files
+    :type data_path: Path
+    :param add_old: if True, add historical data; if False, only add new data
+    :type add_old: bool
+    :param account_filters: optional list of account names to filter by
+    :type account_filters: list[str] | None
+    """
+
+    create_initial_tables(cursor)
+    update_all_schwab_positions_from_dir(data_path, cursor, account_filters)
+
+
+def print_transactions(cursor: sqlite3.Cursor, account_filters: list[str] | None = None) -> None:
+    """
+    Prints all transactions for each account (or specific accounts if filtered).
     Creates a DataFrame with transaction details.
 
     :param cursor: cursor for database connection
     :type cursor: sqlite3.Cursor
-    :param account_filter: optional account name to filter by
-    :type account_filter: str | None
+    :param account_filters: optional list of account names to filter by
+    :type account_filters: list[str] | None
     """
     # Get all accounts or filter by name
-    if account_filter:
-        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
+    if account_filters:
+        placeholders = ",".join("?" * len(account_filters))
+        cursor.execute(
+            f"SELECT id, name, number, owner FROM accounts WHERE name IN ({placeholders})",
+            account_filters,
+        )
     else:
         cursor.execute("SELECT id, name, number, owner FROM accounts")
     accounts = cursor.fetchall()
 
-    if not accounts and account_filter:
-        print(f"No account found with name: {account_filter}")
+    if not accounts and account_filters:
+        print(f"No accounts found with names: {', '.join(account_filters)}")
         return
 
     for acc in accounts:
@@ -611,25 +646,29 @@ def print_transactions(cursor: sqlite3.Cursor, account_filter: str | None = None
             print("  No transactions table found.")
 
 
-def print_positions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
+def print_positions(cursor: sqlite3.Cursor, account_filters: list[str] | None = None) -> None:
     """
-    Prints all positions for each account (or a specific account if filtered).
+    Prints all positions for each account (or specific accounts if filtered).
     Creates a DataFrame with dates as rows and tickers as columns, showing quantities.
 
     :param cursor: cursor for database connection
     :type cursor: sqlite3.Cursor
-    :param account_filter: optional account name to filter by
-    :type account_filter: str | None
+    :param account_filters: optional list of account names to filter by
+    :type account_filters: list[str] | None
     """
     # Get all accounts or filter by name
-    if account_filter:
-        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
+    if account_filters:
+        placeholders = ",".join("?" * len(account_filters))
+        cursor.execute(
+            f"SELECT id, name, number, owner FROM accounts WHERE name IN ({placeholders})",
+            account_filters,
+        )
     else:
         cursor.execute("SELECT id, name, number, owner FROM accounts")
     accounts = cursor.fetchall()
 
-    if not accounts and account_filter:
-        print(f"No account found with name: {account_filter}")
+    if not accounts and account_filters:
+        print(f"No accounts found with names: {', '.join(account_filters)}")
         return
 
     for acc in accounts:
@@ -692,26 +731,30 @@ def print_accounts(cursor: sqlite3.Cursor) -> None:
     print()
 
 
-def dump_summary(cursor: sqlite3.Cursor, account_filter: str | None = None):
+def print_summary(cursor: sqlite3.Cursor, account_filters: list[str] | None = None):
     """
     Prints latest positions for each account, showing all position rows for the most recent date.
     Prints the tickers with data and the range of dates for which there is data.
-    If account_filter is provided, only dump data for that account name.
+    If account_filters is provided, only dump data for those account names.
 
     :param cursor: cursor for database connection
     :type cursor: sqlite3.Cursor
-    :param account_filter: optional account name to filter by
-    :type account_filter: str | None
+    :param account_filters: optional list of account names to filter by
+    :type account_filters: list[str] | None
     """
     # Get all accounts or filter by name
-    if account_filter:
-        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
+    if account_filters:
+        placeholders = ",".join("?" * len(account_filters))
+        cursor.execute(
+            f"SELECT id, name, number, owner FROM accounts WHERE name IN ({placeholders})",
+            account_filters,
+        )
     else:
         cursor.execute("SELECT id, name, number, owner FROM accounts")
     accounts = cursor.fetchall()
 
-    if not accounts and account_filter:
-        print(f"No account found with name: {account_filter}")
+    if not accounts and account_filters:
+        print(f"No accounts found with names: {', '.join(account_filters)}")
         return
     for acc in accounts:
         account_id = acc["id"]
@@ -762,11 +805,76 @@ def dump_summary(cursor: sqlite3.Cursor, account_filter: str | None = None):
 
 
 if __name__ == "__main__":
-    conn = sqlite3.connect(":memory:")
+    parser = argparse.ArgumentParser(
+        description="little-mann investment database.", epilog="Use schwab account credentials if prompted for a login."
+    )
+    parser.add_argument(
+        "--database", default=Path("lmi.db"), type=Path, metavar="fn", help="Name of database file. (default: %(default)s)"
+    )
+    parser.add_argument("-d", "--debug", action="store_true", default=False, help="Enable debug output")
+    parser.add_argument(
+        "--schwab-data",
+        default=Path("schwab-data"),
+        type=Path,
+        metavar="dir",
+        help="Directory to get shwab transactions and positions from. (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--account",
+        action="append",
+        default=None,
+        type=str,
+        help="Only act on this account name. Can be specified multiple times. (default: act on all accounts)",
+    )
+    parser.add_argument(
+        "action",
+        type=str,
+        choices=[
+            "update",
+            "update-positions",
+            "update-transactions",
+            "update-candles",
+            "summary",
+            "positions",
+            "transactions",
+            "accounts",
+            "candles",
+        ],
+        help="Action to take.",
+    )
+    parser.add_argument("--add-old", action="store_true", default=False, help="Add old/historical data when updating.")
+
+    args = parser.parse_args()
+
+    fn = args.database
+    if fn == Path(""):
+        conn = sqlite3.connect(":memory:")
+    else:
+        conn = sqlite3.connect(fn)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
-    # if it asks for verification, use the account login, not the dev portal login
-    update_db(conn.cursor(), Path("schwab-data"))
-    dump_summary(conn.cursor())
-    conn.close()
+    match args.action:
+        case "update":
+            update_transactions(cursor, args.schwab_data, args.add_old, args.account)
+            update_positions(cursor, args.schwab_data, args.add_old, args.account)
+            update_candles(cursor)
+        case "update-positions":
+            update_positions(cursor, args.schwab_data, args.add_old, args.account)
+        case "update-transactions":
+            update_transactions(cursor, args.schwab_data, args.add_old, args.account)
+        case "update-candles":
+            update_candles(cursor)
+        case "summary":
+            print_summary(cursor, args.account)
+        case "accounts":
+            print_accounts(cursor)
+        case "positions":
+            print_positions(cursor, args.account)
+        case "transactions":
+            print_transactions(cursor, args.account)
+        case "candles":
+            print_candles(cursor, args.account)
+        case _:
+            print("inconcievable")
