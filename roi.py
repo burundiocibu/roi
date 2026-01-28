@@ -9,7 +9,7 @@ import sqlite3
 import lmidb
 
 
-def compute_all_account_positions(cursor: sqlite3.Cursor, account_filter: str | None = None) -> dict[str, pd.DataFrame]:
+def compute_all_history(cursor: sqlite3.Cursor, account_filter: str | None = None) -> dict:
     # Get all accounts from the database
     if account_filter:
         cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
@@ -21,55 +21,24 @@ def compute_all_account_positions(cursor: sqlite3.Cursor, account_filter: str | 
         print(f"No account found with name: {account_filter}")
         return {}
 
-    all_positions = {}
-    global account, positions, short_term_gains, long_term_gains, dividends, mgmt_fees, distributions, month
+    global histotry
+    all_history = {}
 
     for account in accounts:
-        positions, short_term_gains, long_term_gains, dividends, mgmt_fees, distributions = compute_account_positions(
-            cursor, account["id"]
-        )
-        all_positions[account["name"]] = positions
+        if args.debug:
+            print(f"Computing history for {account["name"]}")
+        all_history[account["name"]] = compute_account_history(cursor, account["id"])
 
-        # Trim dividends to only include columns with non-zero positions in the last row
-        non_zero_cols = positions.iloc[-1][positions.iloc[-1] != 0].index
-        dividends = dividends[non_zero_cols]
-
-        # Create quarterly versions of the dataframes
-        # Convert index to DatetimeIndex for resampling
-        positions_temp = positions.copy()
-        positions_temp.index = pd.to_datetime(positions_temp.index)
-        short_term_gains_temp = short_term_gains.copy()
-        short_term_gains_temp.index = pd.to_datetime(short_term_gains_temp.index)
-        long_term_gains_temp = long_term_gains.copy()
-        long_term_gains_temp.index = pd.to_datetime(long_term_gains_temp.index)
-        dividends_temp = dividends.copy()
-        dividends_temp.index = pd.to_datetime(dividends_temp.index)
-        mgmt_fees_temp = mgmt_fees.copy()
-        mgmt_fees_temp.index = pd.to_datetime(mgmt_fees_temp.index)
-        distributions_temp = distributions.copy()
-        distributions_temp.index = pd.to_datetime(distributions_temp.index)
-
-        # Resample to quarterly: positions use last, others use sum
-        positions_quarterly = positions_temp.resample("QE").last()
-        short_term_gains_quarterly = short_term_gains_temp.resample("QE").sum()
-        long_term_gains_quarterly = long_term_gains_temp.resample("QE").sum()
-        dividends_quarterly = dividends_temp.resample("QE").sum()
-        mgmt_fees_quarterly = mgmt_fees_temp.resample("QE").sum()
-        distributions_quarterly = distributions_temp.resample("QE").sum()
-
-        print(f"{account["name"]} quarterly dividends")
-        print(f"{dividends_quarterly}")
-
-    return all_positions
+    return all_history
 
 
-def compute_account_positions(cursor: sqlite3.Cursor, account_id: int):
-    """Compute monthly positions and activity for given account for day there are transactions."""
+def compute_account_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
+    """Compute monthly positions, short term gains, long term gains, income, management fees, and distributions
+    for the indicated account."""
 
     cursor.execute(f"SELECT MIN(Date) as first_date, MAX(Date) as last_date FROM transactions_{account_id}")
     result = cursor.fetchone()
     first_transaction_date = dt.datetime.fromisoformat(result["first_date"])
-    latest_transaction_date = dt.datetime.fromisoformat(result["last_date"])
 
     cursor.execute(
         f"""
@@ -171,6 +140,9 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int):
                     positions.loc[month, cash] -= amount
                     long_term_gains.loc[month, symbol] += amount # type: ignore
                     income.loc[month, symbol] += amount # type: ignore
+                case "Funds Received":
+                    positions.loc[month, cash] -= amount
+                    distributions.loc[month] -= amount
                 case "Long Term Cap Gain":
                     positions.loc[month, cash] -= amount
                     long_term_gains.loc[month, symbol] += amount # type: ignore
@@ -216,63 +188,58 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int):
                 else:
                     print(f"{cash}:{positions.loc[month, cash]:.2f}")
 
-    return positions, short_term_gains, long_term_gains, income, mgmt_fees, distributions
+    history = {
+        "positions": positions,
+        "stg": short_term_gains,
+        "ltg": long_term_gains,
+        "income": income,
+        "fees": mgmt_fees,
+        "distributions": distributions,
+    }
+    return history
 
 
-def roi(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
-    # Get all accounts from the database
-    if account_filter:
-        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
-    else:
-        cursor.execute("SELECT id, name, number, owner FROM accounts")
-    accounts = cursor.fetchall()
-
-    if not accounts and account_filter:
-        print(f"No account found with name: {account_filter}")
-        return {}
-
-    all_positions = {}
-    for account in accounts:
-        all_positions[account["name"]], activity = compute_account_positions(cursor, account["id"])
-
-    return all_positions
+def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    print("tbi")
 
 
-def foo():
-    # Categorize the transaction
-    # fmt: off
-    match action:
-        case "Reinvest Dividend" | "Long Term Cap Gain Reinvest" | "Short Term Cap Gain Reinvest" | "Reinvest Shares":
-            transaction_summary.loc[month_end, "reinvested dividends"] += amount # type: ignore
-        case "Cash Dividend" | "Div Adjustment" | "Dividend Adj" | "Short Term Cap Gain" | "Long Term Cap Gain" | "Special Dividend" | "Bond Interest" | "Bank Interest" | "Reinvestment Adj":
-            transaction_summary.loc[month_end, "cash dividends"] += amount # type: ignore
-        case "Advisor Fee" | "Advisor Fee Adj":
-            transaction_summary.loc[month_end, "advisor fees"] += amount # type: ignore
-        case "MoneyLink Transfer" | "Security Transfer" | "Funds Received":
-            if amount > 0:
-                transaction_summary.loc[month_end, "contributions"] += amount # type: ignore
-            else:
-                transaction_summary.loc[month_end, "distributions"] += amount # type: ignore
-        case "Wire Sent":
-            transaction_summary.loc[month_end, "distributions"] += amount # type: ignore
-        case "Buy" | "Sell" | "Full Redemption" | "Full Redemption Adj" | "Stock Split":
-            # These don't affect transaction summary - they're position changes only
-            pass
-        case "Journal" | "Journaled Shares":
-            # These are not yet handled - log for now
-            print(f"Warning: Unhandled action '{action}' on {date} with amount {amount}")
-        case _:
-            # Unhandled action type
-            print(f"Warning: Unknown action '{action}' on {date} with amount {amount}")
-    # fmt: on
-
-
-def summary(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
-    all_positions = compute_all_account_positions(cursor, account_filter)
-    for account in all_positions.keys():
+def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    for account, history in all_history.items():
         print(f"Account: {account}")
-        p = all_positions[account].iloc[0]
+        p = history["positions"].iloc[0]
         print(p.to_frame().T)
+
+
+def quarterly_income(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    for account, history in all_history.items():
+        # find which securities are still in the account
+        active = history["positions"].iloc[-1][history["positions"].iloc[-1] != 0].index
+
+        # Create quarterly versions of the dataframes
+        # Convert index to DatetimeIndex for resampling
+        positions_temp = history["positions"].copy()
+        positions_temp.index = pd.to_datetime(positions_temp.index)
+        short_term_gains_temp = history["stg"].copy()
+        short_term_gains_temp.index = pd.to_datetime(short_term_gains_temp.index)
+        long_term_gains_temp = history["ltg"].copy()
+        long_term_gains_temp.index = pd.to_datetime(long_term_gains_temp.index)
+        income_temp = history["income"].copy()
+        income_temp.index = pd.to_datetime(income_temp.index)
+        mgmt_fees_temp = history["fees"].copy()
+        mgmt_fees_temp.index = pd.to_datetime(mgmt_fees_temp.index)
+        distributions_temp = history["distributions"].copy()
+        distributions_temp.index = pd.to_datetime(distributions_temp.index)
+
+        # Resample to quarterly: positions use last, others use sum
+        positions_quarterly = positions_temp.resample("QE").last()
+        short_term_gains_quarterly = short_term_gains_temp.resample("QE").sum()
+        long_term_gains_quarterly = long_term_gains_temp.resample("QE").sum()
+        income_quarterly = income_temp.resample("QE").sum()
+        mgmt_fees_quarterly = mgmt_fees_temp.resample("QE").sum()
+        distributions_quarterly = distributions_temp.resample("QE").sum()
+
+        print(f"{account} quarterly income:")
+        print(f"{income_quarterly[active]}")
 
 
 def main():
@@ -294,12 +261,13 @@ def main():
         "action",
         type=str,
         choices=[
-            "update-db",
-            "dump-db",
+            "quarterly-income",
             "summary",
             "roi",
             "update-candles",
-            "compute-positions",
+            "compute-history",
+            "update-db",
+            "dump-db",
             "print-accounts",
             "print-positions",
             "print-transactions",
@@ -324,19 +292,25 @@ def main():
     global cursor
     cursor = conn.cursor()
 
+    all_history = {}
+    if args.action in ["summary", "roi", "compute-history", "quarterly-income"]:
+        all_history = compute_all_history(cursor, args.account)
+
     match args.action:
+        case "summary":
+            summary(cursor, all_history)
+        case "roi":
+            roi(cursor, all_history)
+        case "quarterly-income":
+            quarterly_income(cursor, all_history)
+        case "compute-history":
+            pass
         case "update-db":
             lmidb.update_db(cursor, args.schwab_data, args.add_old, args.account)
         case "update-candles":
             lmidb.update_candles(cursor)
-        case "summary":
-            summary(cursor, args.account)
-        case "roi":
-            roi(cursor)
         case "dump-db":
             lmidb.dump_summary(cursor, args.account)
-        case "compute-positions":
-            compute_all_account_positions(cursor, args.account)
         case "print-accounts":
             lmidb.print_accounts(cursor)
         case "print-positions":
