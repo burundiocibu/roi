@@ -5,8 +5,6 @@ import datetime as dt
 import pandas as pd
 from pathlib import Path
 import sqlite3
-import sys
-import types
 
 import lmidb
 
@@ -24,15 +22,49 @@ def compute_all_account_positions(cursor: sqlite3.Cursor, account_filter: str | 
         return {}
 
     all_positions = {}
+    global account, positions, short_term_gains, long_term_gains, dividends, mgmt_fees, distributions, month
+
     for account in accounts:
-        all_positions[account["name"]] = compute_account_positions(cursor, account["id"])
+        positions, short_term_gains, long_term_gains, dividends, mgmt_fees, distributions = compute_account_positions(
+            cursor, account["id"]
+        )
+        all_positions[account["name"]] = positions
+
+        # Trim dividends to only include columns with non-zero positions in the last row
+        non_zero_cols = positions.iloc[-1][positions.iloc[-1] != 0].index
+        dividends = dividends[non_zero_cols]
+
+        # Create quarterly versions of the dataframes
+        # Convert index to DatetimeIndex for resampling
+        positions_temp = positions.copy()
+        positions_temp.index = pd.to_datetime(positions_temp.index)
+        short_term_gains_temp = short_term_gains.copy()
+        short_term_gains_temp.index = pd.to_datetime(short_term_gains_temp.index)
+        long_term_gains_temp = long_term_gains.copy()
+        long_term_gains_temp.index = pd.to_datetime(long_term_gains_temp.index)
+        dividends_temp = dividends.copy()
+        dividends_temp.index = pd.to_datetime(dividends_temp.index)
+        mgmt_fees_temp = mgmt_fees.copy()
+        mgmt_fees_temp.index = pd.to_datetime(mgmt_fees_temp.index)
+        distributions_temp = distributions.copy()
+        distributions_temp.index = pd.to_datetime(distributions_temp.index)
+
+        # Resample to quarterly: positions use last, others use sum
+        positions_quarterly = positions_temp.resample("QE").last()
+        short_term_gains_quarterly = short_term_gains_temp.resample("QE").sum()
+        long_term_gains_quarterly = long_term_gains_temp.resample("QE").sum()
+        dividends_quarterly = dividends_temp.resample("QE").sum()
+        mgmt_fees_quarterly = mgmt_fees_temp.resample("QE").sum()
+        distributions_quarterly = distributions_temp.resample("QE").sum()
+
+        print(f"{account["name"]} quarterly dividends")
+        print(f"{dividends_quarterly}")
 
     return all_positions
 
 
-def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.DataFrame:
-    """Compute positions for given account for day there are transactions."""
-    global dtis, dtie, positions, latest_position_df, months, symbols
+def compute_account_positions(cursor: sqlite3.Cursor, account_id: int):
+    """Compute monthly positions and activity for given account for day there are transactions."""
 
     cursor.execute(f"SELECT MIN(Date) as first_date, MAX(Date) as last_date FROM transactions_{account_id}")
     result = cursor.fetchone()
@@ -61,23 +93,30 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
     positions = pd.DataFrame(index=dtie, columns=symbols)
 
     # initialize the end of positions datafrom with the latest position data
-    positions.loc[dtie.iloc[-1]] = 0
+    positions[:] = 0
     for i, r in latest_position_df.iterrows():
         positions.loc[dtie.iloc[-1], r["symbol"]] = r["quantity"]
 
     cash = positions.columns[positions.columns.get_loc(lmidb.cash)]
 
-    debug = False
-    if debug:
-        print(f"{positions.iloc[-1].to_frame().T}")
+    short_term_gains = pd.DataFrame(index=dtie, columns=symbols)
+    short_term_gains[:] = 0.0
+    long_term_gains = pd.DataFrame(index=dtie, columns=symbols)
+    long_term_gains[:] = 0.0
+    income = pd.DataFrame(index=dtie, columns=symbols)
+    income[:] = 0
+    mgmt_fees = pd.Series(index=dtie)
+    mgmt_fees[:] = 0
+    distributions = pd.Series(index=dtie)
+    distributions[:] = 0
 
     # start of month, end of month, and end of previous month
     months = pd.concat([dtis, dtie, dtie.shift(1)], axis=1)[::-1]
     for i, m in months.iterrows():
-        # print(f"m0:{m[0]}, m1:{m[1]}, m2:{m[2]}")
         if m[2] == None:
             break
-        positions.loc[m[2]] = positions.loc[m[1]]
+        month = m[2]
+        positions.loc[month] = positions.loc[m[1]]
 
         cursor.execute(
             f"SELECT * FROM transactions_{account_id} WHERE Date >= ? AND Date <= ? ORDER BY Date DESC",
@@ -91,111 +130,141 @@ def compute_account_positions(cursor: sqlite3.Cursor, account_id: int) -> pd.Dat
             amount = float(t["Amount"])
             fees = float(t["fees"])
             price = float(t["price"])
+            tdate = t["date"][:10]
+            if args.debug:
+                print(f"Transaction: {tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}", end="")
+                if symbol != "":
+                    print(f" --- {symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f} -> ", end="")
+                else:
+                    print(f" --- {cash}:{positions.loc[month, cash]:.2f} -> ", end="")
 
             # The sign is reversed on transactions because we are going backwards in time
-            # Have verified this algo on jon-ira back to Dec 2021
             # fmt: off
             match action:
-                case "Journal":
-                    print("Handle journal")
-                    sys.exit(-1)
-                case "Journaled Shares":
-                    print("Handle journal")
-                    sys.exit(-1)
-                case "Reinvest Shares":
-                    positions.loc[m[2], symbol] -= quantity
-                    positions.loc[m[2], cash] += amount
-                case "Reinvestment Adj":
-                    positions.loc[m[2], symbol] += quantity
-                    positions.loc[m[2], cash] += amount
-                case "Reinvest Dividend" | "Long Term Cap Gain Reinvest" | "Short Term Cap Gain Reinvest" | "Div Adjustment" | "Dividend Adj" | "Short Term Cap Gain" | "Long Term Cap Gain":
-                    positions.loc[m[2], cash] += amount
+                case "Advisor Fee":
+                    # these are negative to start with
+                    positions.loc[month, cash] += amount
+                    mgmt_fees[month] -= amount
+                case "Bank Interest":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, cash] += amount
+                case "Bond Interest":
+                    positions.loc[month, cash] += amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
                 case "Buy":
-                    positions.loc[m[2], symbol] -= quantity
-                    positions.loc[m[2], cash] -= amount
-                case "Sell":
-                    positions.loc[m[2], symbol] += quantity
-                    positions.loc[m[2], cash] -= amount
-                case "Full Redemption" | "Full Redemption Adj":
-                    positions.loc[m[2], symbol] -= quantity
-                    positions.loc[m[2], cash] -= amount
+                    positions.loc[month, symbol] -= quantity # type: ignore
+                    positions.loc[month, cash] -= amount
+                case "Cash Dividend":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Div Adjustment":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Full Redemption":
+                    positions.loc[month, symbol] -= amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Full Redemption Adj":
+                    positions.loc[month, cash] -= amount
+                    long_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Long Term Cap Gain":
+                    positions.loc[month, cash] -= amount
+                    long_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Long Term Cap Gain Reinvest":
+                    positions.loc[month, cash] -= amount
+                    long_term_gains.loc[month, symbol] += amount # type: ignore
+                case "MoneyLink Transfer":
+                    positions.loc[month, cash] -= amount
+                    distributions[month] -= amount
+                case "Reinvest Dividend":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                case "Reinvest Shares":
+                    positions.loc[month, cash] -= amount
+                    positions.loc[month, symbol] -= quantity # type: ignore
                 case "Security Transfer":
-                    if symbol != "":
-                        print(f"New condition for {action} on {t['date']}")
-                    positions.loc[m[2], cash] -= amount
-                case "Bank Interest" | "Cash Dividend" | "Bond Interest" | "Advisor Fee" | "Advisor Fee Adj" | "Special Dividend" | "Funds Received":
-                    positions.loc[m[2], cash] -= amount
-                case "MoneyLink Transfer" | "Wire Sent":
-                    positions.loc[m[2], cash] -= amount
+                    positions.loc[month, cash] -= amount
+                case "Sell":
+                    positions.loc[month, symbol] += quantity # type: ignore
+                    positions.loc[month, cash] -= amount
+                    long_term_gains.loc[month, symbol] += amount # type: ignore
+                case "Short Term Cap Gain":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Special Dividend":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
                 case "Stock Split":
-                    positions.loc[m[2], symbol] -= quantity
+                    positions.loc[month, symbol] -= quantity # type: ignore
+                case "Wire Sent":
+                    positions.loc[month, cash] -= amount
+                    distributions[month] -= amount
                 case _:
                     print(f"Unhandled action: i:{i}")
-                    print(f"  {t['date']} {action} {symbol} {quantity} {amount} {fees} {price}")
-                    print(f"  Description: {t['description']}")
+                    print(f"{tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}")
             # fmt: off
-            if debug:
-                print(f"{t['date']} {action}, {symbol}, {quantity}, {amount}, {fees}, {price}")
-                ph = positions.loc[m[2]].to_frame().T
-                print(f"{ph}")
-    return positions
+            if args.debug:
+                if symbol != "":
+                    print(f"{symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f}")
+                else:
+                    print(f"{cash}:{positions.loc[month, cash]:.2f}")
+
+    return positions, short_term_gains, long_term_gains, income, mgmt_fees, distributions
 
 
-def analyze(account: dict[str, pd.DataFrame], closings) -> None:
-    if len(account) == 0:
-        return
-    print(f"Processing {account['name']}")
-    global transactions, positions
-    transactions = account["transactions"]
-    final_positions = account["positions"]
+def roi(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
+    # Get all accounts from the database
+    if account_filter:
+        cursor.execute("SELECT id, name, number, owner FROM accounts WHERE name = ?", (account_filter,))
+    else:
+        cursor.execute("SELECT id, name, number, owner FROM accounts")
+    accounts = cursor.fetchall()
 
-    positions = compute_positions(transactions, final_positions)
+    if not accounts and account_filter:
+        print(f"No account found with name: {account_filter}")
+        return {}
 
-    years = transactions["Date"].apply(lambda x: x.year).unique()[::-1]
-    for year in years:
-        global y_start, y_end, ymask, ty, sym, price_start, prices_end, start_value, end_value
-        y_start = pd.Timestamp(f"{year-1}-12-31").date()
-        y_end = min(pd.Timestamp(f"{year}-12-31").date(), positions.index[-1])
-        pct_of_year = (y_end - y_start).days / (pd.Timestamp(f"{year}-12-31").date() - y_start).days
-        ymask = (transactions["Date"] > y_start) & (transactions["Date"] <= y_end)
-        ty = transactions[ymask]
+    all_positions = {}
+    for account in accounts:
+        all_positions[account["name"]], activity = compute_account_positions(cursor, account["id"])
 
-        # Make sure we have starting prices
-        if y_start not in positions.index:
-            continue
+    return all_positions
 
-        # Really should make this track realized gains
-        dividends = ty["Amount"][ty["Action"] == "Cash Dividend"].sum()
-        advisor_fees = -ty["Amount"][ty["Action"] == "Advisor Fee"].sum()
-        advisor_fees += -ty["Amount"][ty["Action"] == "Advisor Fee Adj"].sum()
-        net_contributions = ty["Amount"][ty["Action"] == "MoneyLink Transfer"].sum()
-        net_contributions += ty["Amount"][ty["Action"] == "Wire Sent"].sum()
 
-        pstart = positions.loc[y_start]
-        pstart = pstart[pstart > 0]
-        cstart = closings.iloc[closings.index.searchsorted(y_start)]
-        start_value = (cstart.loc[pstart.index] * pstart).sum()
-
-        end_value = 0.0
-        pend = positions.loc[y_end]
-        pend = pend[pend > 0]
-        cend = closings.iloc[closings.index.searchsorted(y_end, side="right") - 1]
-        end_value = (cend.loc[pend.index] * pend).sum()
-
-        # ROI Calculation
-        if start_value > 0.0:
-            roi = (end_value - start_value - net_contributions) / start_value
-            roi_pct = 100 * roi
-        else:
-            roi_pct = float("NaN")
-
-        print(f"Year: {year} through {y_end}")
-        print(f"  Start Value: {start_value:.2f} End Value: {end_value:.2f}")
-        print(f"  Dividends: {dividends:.2f}")
-        print(f"  Net Contributions: {net_contributions:.2f}")
-        print(f"  Advisors Fees: {advisor_fees.sum():.2f}")
-        print(f"  ROI: {roi_pct:.2f}%, {roi_pct/pct_of_year:.2f}% annual")
-        # print(f"Transactions:\n{ty}")
+def foo():
+    # Categorize the transaction
+    # fmt: off
+    match action:
+        case "Reinvest Dividend" | "Long Term Cap Gain Reinvest" | "Short Term Cap Gain Reinvest" | "Reinvest Shares":
+            transaction_summary.loc[month_end, "reinvested dividends"] += amount # type: ignore
+        case "Cash Dividend" | "Div Adjustment" | "Dividend Adj" | "Short Term Cap Gain" | "Long Term Cap Gain" | "Special Dividend" | "Bond Interest" | "Bank Interest" | "Reinvestment Adj":
+            transaction_summary.loc[month_end, "cash dividends"] += amount # type: ignore
+        case "Advisor Fee" | "Advisor Fee Adj":
+            transaction_summary.loc[month_end, "advisor fees"] += amount # type: ignore
+        case "MoneyLink Transfer" | "Security Transfer" | "Funds Received":
+            if amount > 0:
+                transaction_summary.loc[month_end, "contributions"] += amount # type: ignore
+            else:
+                transaction_summary.loc[month_end, "distributions"] += amount # type: ignore
+        case "Wire Sent":
+            transaction_summary.loc[month_end, "distributions"] += amount # type: ignore
+        case "Buy" | "Sell" | "Full Redemption" | "Full Redemption Adj" | "Stock Split":
+            # These don't affect transaction summary - they're position changes only
+            pass
+        case "Journal" | "Journaled Shares":
+            # These are not yet handled - log for now
+            print(f"Warning: Unhandled action '{action}' on {date} with amount {amount}")
+        case _:
+            # Unhandled action type
+            print(f"Warning: Unknown action '{action}' on {date} with amount {amount}")
+    # fmt: on
 
 
 def summary(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
@@ -206,15 +275,12 @@ def summary(cursor: sqlite3.Cursor, account_filter: str | None = None) -> None:
         print(p.to_frame().T)
 
 
-def roi(cursor: sqlite3.Cursor) -> None:
-    print("tbd")
-
-
 def main():
     parser = argparse.ArgumentParser(description="ROI calculator", epilog="Use schwab account credentials if prompted for a login.")
     parser.add_argument(
         "--database", default=Path("lmi.db"), type=Path, metavar="fn", help="Name of database file. (default: %(default)s)"
     )
+    parser.add_argument("-d", "--debug", action="store_true", default=False, help="Enable debug output")
     parser.add_argument(
         "--schwab-data",
         default=Path("schwab-data"),
@@ -240,6 +306,7 @@ def main():
         ],
         help="Action to take.",
     )
+    global args
     args = parser.parse_args()
 
     pd.options.display.float_format = "{:.2f}".format
@@ -247,7 +314,6 @@ def main():
     pd.set_option("display.max_columns", None)
     pd.set_option("display.width", 1000)
 
-    global conn
     fn = args.database
     if fn == Path(""):
         conn = sqlite3.connect(":memory:")
@@ -270,10 +336,7 @@ def main():
         case "dump-db":
             lmidb.dump_summary(cursor, args.account)
         case "compute-positions":
-            all_positions = compute_all_account_positions(cursor, args.account)
-            for account in all_positions.keys():
-                print(f"Account: {account}")
-                print(f"{all_positions[account]}")
+            compute_all_account_positions(cursor, args.account)
         case "print-accounts":
             lmidb.print_accounts(cursor)
         case "print-positions":

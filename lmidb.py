@@ -15,7 +15,7 @@ import schapi
 
 # this is a stupid identifier to deal with the fact that there is a stock ticker
 # with the value of "cash"
-cash = "__cash"
+cash = "cash"
 
 
 def create_initial_tables(cursor: sqlite3.Cursor) -> None:
