@@ -9,7 +9,8 @@ import sqlite3
 import lmidb
 
 
-def compute_all_history(cursor: sqlite3.Cursor, account_filters: list[str] | None = None) -> dict:
+def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dict:
+    account_filters = args.account
     # Get all accounts from the database
     if account_filters:
         placeholders = ",".join("?" * len(account_filters))
@@ -25,7 +26,6 @@ def compute_all_history(cursor: sqlite3.Cursor, account_filters: list[str] | Non
         print(f"No accounts found with names: {', '.join(account_filters)}")
         return {}
 
-    global histotry
     all_history = {}
 
     for account in accounts:
@@ -40,7 +40,9 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     """Compute monthly positions, short term gains, long term gains, income, management fees, and distributions
     for the indicated account."""
 
-    cursor.execute(f"SELECT MIN(Date) as first_date, MAX(Date) as last_date FROM transactions_{account_id}")
+    cursor.execute(
+        f"SELECT MIN(Date) as first_date, MAX(Date) as last_date FROM transactions_{account_id}"
+    )
     result = cursor.fetchone()
     first_transaction_date = dt.datetime.fromisoformat(result["first_date"])
 
@@ -56,8 +58,12 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     # start dataframe with the oldest transaction
     start_date = dt.date(first_transaction_date.year, first_transaction_date.month, 1)
     # end with the most recent position
-    dtis = pd.Series(pd.date_range(start=start_date, end=latest_position_date, freq="MS").date)
-    dtie = list(pd.date_range(start=start_date, end=latest_position_date, freq="ME").date)
+    dtis = pd.Series(
+        pd.date_range(start=start_date, end=latest_position_date, freq="MS").date
+    )
+    dtie = list(
+        pd.date_range(start=start_date, end=latest_position_date, freq="ME").date
+    )
     if dtie[-1] < latest_position_date.date():
         dtie.append(latest_position_date.date())
     dtie = pd.Series(dtie)
@@ -105,9 +111,15 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
             price = float(t["price"])
             tdate = t["date"][:10]
             if args.debug:
-                print(f"Transaction: {tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}", end="")
+                print(
+                    f"Transaction: {tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}",
+                    end="",
+                )
                 if symbol != "":
-                    print(f" --- {symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f} -> ", end="")
+                    print(
+                        f" --- {symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f} -> ",
+                        end="",
+                    )
                 else:
                     print(f" --- {cash}:{positions.loc[month, cash]:.2f} -> ", end="")
 
@@ -116,7 +128,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
             match action:
                 case "Advisor Fee":
                     # these are negative to start with
-                    positions.loc[month, cash] += amount
+                    positions.loc[month, cash] -= amount
+                    mgmt_fees[month] -= amount
+                case "Advisor Fee Adj":
+                    positions.loc[month, cash] -= amount
                     mgmt_fees[month] -= amount
                 case "Bank Interest":
                     positions.loc[month, cash] -= amount
@@ -129,6 +144,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                     positions.loc[month, symbol] -= quantity # type: ignore
                     positions.loc[month, cash] -= amount
                 case "Cash Dividend":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Div Adj":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
                     income.loc[month, symbol] += amount # type: ignore
@@ -163,6 +182,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 case "Reinvest Shares":
                     positions.loc[month, cash] -= amount
                     positions.loc[month, symbol] -= quantity # type: ignore
+                case "Reinvestmetn Adj":
+                    positions.loc[month, symbol] -= quantity
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
                 case "Security Transfer":
                     positions.loc[month, cash] -= amount
                 case "Sell":
@@ -170,6 +193,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                     positions.loc[month, cash] -= amount
                     long_term_gains.loc[month, symbol] += amount # type: ignore
                 case "Short Term Cap Gain":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
+                case "Short Term Cap Reinvest":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
                     income.loc[month, symbol] += amount # type: ignore
@@ -192,6 +219,8 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 else:
                     print(f"{cash}:{positions.loc[month, cash]:.2f}")
 
+    # recompute the history on the indicated interval
+
     history = {
         "positions": positions,
         "stg": short_term_gains,
@@ -200,6 +229,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
         "fees": mgmt_fees,
         "distributions": distributions,
     }
+    if args.active:
+        # compute which securities are stil the account
+        lp = positions.iloc[-1]
+        history["active"] = lp[lp != 0].index
     return history
 
 
@@ -210,7 +243,10 @@ def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
 def positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"Account: {account}")
-        print(f"{history["positions"]}")
+        if "active" in history.keys():
+            print(history["positions"][history["active"]])
+        else:
+            print(history["positions"])
 
 
 def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
@@ -253,11 +289,34 @@ def quarterly_income(cursor: sqlite3.Cursor, all_history: dict) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ROI calculator", epilog="Use schwab account credentials if prompted for a login.")
-    parser.add_argument(
-        "--database", default=Path("lmi.db"), type=Path, metavar="fn", help="Name of database file. (default: %(default)s)"
+    parser = argparse.ArgumentParser(
+        description="ROI calculator",
+        epilog="Use schwab account credentials if prompted for a login.",
     )
-    parser.add_argument("-d", "--debug", action="store_true", default=False, help="Enable debug output")
+    parser.add_argument(
+        "--database",
+        default=Path("lmi.db"),
+        type=Path,
+        metavar="fn",
+        help="Name of database file. (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-d", "--debug", action="store_true", default=False, help="Enable debug output"
+    )
+    parser.add_argument(
+        "-i",
+        "--interval",
+        default="monthly",
+        choices=["monthly,quarterly,yearly,all"],
+        help="Interval to report on.",
+    )
+    parser.add_argument(
+        "-a",
+        "--active",
+        action="store_true",
+        default=False,
+        help="Only show information for securities in the account at the most recent position.",
+    )
     parser.add_argument(
         "--account",
         action="append",
@@ -294,7 +353,7 @@ def main():
     global cursor
     cursor = conn.cursor()
 
-    all_history = compute_all_history(cursor, args.account)
+    all_history = compute_all_history(cursor, args)
 
     match args.action:
         case "summary":
@@ -303,8 +362,8 @@ def main():
             positions(cursor, all_history)
         case "roi":
             roi(cursor, all_history)
-        case "quarterly-income":
-            quarterly_income(cursor, all_history)
+        case "income":
+            income(cursor, all_history)
         case _:
             print("inconcievable")
 
