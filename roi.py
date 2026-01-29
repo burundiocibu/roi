@@ -242,6 +242,18 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
         distributions_temp.index = pd.to_datetime(distributions_temp.index)
         distributions = distributions_temp.resample(args.interval).sum()
 
+    if False:
+        # add totals to the income, short_term_gains, and long_term_gains
+        income_total = income.sum()
+        income.index = income.index.strftime("%Y-%m-%d")
+        income.loc["Total"] = income_total
+        short_term_gains_total = short_term_gains.sum()
+        short_term_gains.index = short_term_gains.index.strftime("%Y-%m-%d")
+        short_term_gains.loc["Total"] = short_term_gains_total
+        long_term_gains_total = long_term_gains.sum()
+        long_term_gains.index = long_term_gains.index.strftime("%Y-%m-%d")
+        long_term_gains.loc["Total"] = long_term_gains_total
+
     if args.active:
         # Only include securities still in account
         lp = positions.iloc[-1]
@@ -277,7 +289,6 @@ def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
         print(f"distributions\n{history["distributions"]}")
 
 
-
 def positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"Account: {account}")
@@ -295,10 +306,7 @@ def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
 def income(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"{account} income:")
-        income_df = history["income"]
-        total_income = income_df.sum()
-        income_df.loc["Total"] = total_income
-        print(income_df)
+        print(history["income"])
 
 
 def main():
