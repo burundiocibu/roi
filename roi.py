@@ -147,11 +147,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
                     income.loc[month, symbol] += amount # type: ignore
-                case "Div Adj":
-                    positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
-                case "Div Adjustment":
+                case "Div Adj" | "Dividend Adj" | "Div Adjustment":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
                     income.loc[month, symbol] += amount # type: ignore
@@ -182,10 +178,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 case "Reinvest Shares":
                     positions.loc[month, cash] -= amount
                     positions.loc[month, symbol] -= quantity # type: ignore
-                case "Reinvestmetn Adj":
-                    positions.loc[month, symbol] -= quantity
+                case "Reinvestment Adj":
+                    positions.loc[month, symbol] -= quantity # type: ignore
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
                 case "Security Transfer":
                     positions.loc[month, cash] -= amount
                 case "Sell":
@@ -196,7 +192,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
                     income.loc[month, symbol] += amount # type: ignore
-                case "Short Term Cap Reinvest":
+                case "Short Term Cap Gain Reinvest":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
                     income.loc[month, symbol] += amount # type: ignore
@@ -219,7 +215,41 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 else:
                     print(f"{cash}:{positions.loc[month, cash]:.2f}")
 
-    # recompute the history on the indicated interval
+    # resample the history on the indicated interval
+    if args.interval != "ME":
+        # Convert index to DatetimeIndex for resampling
+        positions_temp = positions.copy()
+        positions_temp.index = pd.to_datetime(positions_temp.index)
+        positions = positions_temp.resample(args.interval).last()
+
+        short_term_gains_temp = short_term_gains.copy()
+        short_term_gains_temp.index = pd.to_datetime(short_term_gains_temp.index)
+        short_term_gains = short_term_gains_temp.resample(args.interval).sum()
+
+        long_term_gains_temp = long_term_gains.copy()
+        long_term_gains_temp.index = pd.to_datetime(long_term_gains_temp.index)
+        long_term_gains = long_term_gains_temp.resample(args.interval).sum()
+
+        income_temp = income.copy()
+        income_temp.index = pd.to_datetime(income_temp.index)
+        income = income_temp.resample(args.interval).sum()
+
+        mgmt_fees_temp = mgmt_fees.copy()
+        mgmt_fees_temp.index = pd.to_datetime(mgmt_fees_temp.index)
+        mgmt_fees = mgmt_fees_temp.resample(args.interval).sum()
+
+        distributions_temp = distributions.copy()
+        distributions_temp.index = pd.to_datetime(distributions_temp.index)
+        distributions = distributions_temp.resample(args.interval).sum()
+
+    if args.active:
+        # Only include securities still in account
+        lp = positions.iloc[-1]
+        lpi = lp[lp != 0].index
+        positions = positions[lpi]
+        short_term_gains = short_term_gains[lpi]
+        long_term_gains = long_term_gains[lpi]
+        income = income[lpi]
 
     history = {
         "positions": positions,
@@ -237,55 +267,38 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
 
 
 def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
-    print("tbi")
+    for account, history in all_history.items():
+        print(f"Account: {account} positions:")
+        print(history["positions"])
+        print(f"short_term_gains\n{history["stg"]}")
+        print(f"long_term_gains\n{history["ltg"]}")
+        print(f"income\n{history["income"]}")
+        print(f"fees\n{history["fees"]}")
+        print(f"distributions\n{history["distributions"]}")
+
 
 
 def positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"Account: {account}")
-        if "active" in history.keys():
-            print(history["positions"][history["active"]])
-        else:
-            print(history["positions"])
+        print(history["positions"])
 
 
 def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
+        positions = history["positions"]
         print(f"Account: {account}")
-        print(history["positions"].iloc[0].to_frame().T)
-        print(history["positions"].iloc[-1].to_frame().T)
+        print(positions.iloc[0].to_frame().T)
+        print(positions.iloc[-1].to_frame().T)
 
 
-def quarterly_income(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def income(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
-        # find which securities are still in the account
-        active = history["positions"].iloc[-1][history["positions"].iloc[-1] != 0].index
-
-        # Create quarterly versions of the dataframes
-        # Convert index to DatetimeIndex for resampling
-        positions_temp = history["positions"].copy()
-        positions_temp.index = pd.to_datetime(positions_temp.index)
-        short_term_gains_temp = history["stg"].copy()
-        short_term_gains_temp.index = pd.to_datetime(short_term_gains_temp.index)
-        long_term_gains_temp = history["ltg"].copy()
-        long_term_gains_temp.index = pd.to_datetime(long_term_gains_temp.index)
-        income_temp = history["income"].copy()
-        income_temp.index = pd.to_datetime(income_temp.index)
-        mgmt_fees_temp = history["fees"].copy()
-        mgmt_fees_temp.index = pd.to_datetime(mgmt_fees_temp.index)
-        distributions_temp = history["distributions"].copy()
-        distributions_temp.index = pd.to_datetime(distributions_temp.index)
-
-        # Resample to quarterly: positions use last, others use sum
-        positions_quarterly = positions_temp.resample("QE").last()
-        short_term_gains_quarterly = short_term_gains_temp.resample("QE").sum()
-        long_term_gains_quarterly = long_term_gains_temp.resample("QE").sum()
-        income_quarterly = income_temp.resample("QE").sum()
-        mgmt_fees_quarterly = mgmt_fees_temp.resample("QE").sum()
-        distributions_quarterly = distributions_temp.resample("QE").sum()
-
-        print(f"{account} quarterly income:")
-        print(f"{income_quarterly[active]}")
+        print(f"{account} income:")
+        income_df = history["income"]
+        total_income = income_df.sum()
+        income_df.loc["Total"] = total_income
+        print(income_df)
 
 
 def main():
@@ -306,8 +319,8 @@ def main():
     parser.add_argument(
         "-i",
         "--interval",
-        default="monthly",
-        choices=["monthly,quarterly,yearly,all"],
+        default="ME",
+        choices=["ME","QE","YE","all"],
         help="Interval to report on.",
     )
     parser.add_argument(
@@ -329,7 +342,7 @@ def main():
         type=str,
         choices=[
             "positions",
-            "quarterly-income",
+            "income",
             "summary",
             "roi",
         ],
