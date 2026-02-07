@@ -499,6 +499,53 @@ def update_candles(cursor: sqlite3.Cursor) -> None:
     print("\nCandle updates complete.")
 
 
+def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date | dt.datetime) -> pd.Series:
+    """
+    Returns the closing values for a list of tickers for a single date as a pandas Series.
+    If no data exists for a ticker on that date, NaN is returned for that ticker.
+
+    :param cursor: cursor for database connection
+    :type cursor: sqlite3.Cursor
+    :param tickers: list of ticker symbols
+    :type tickers: list[str]
+    :param date: date to get closing values for
+    :type date: dt.date | dt.datetime
+    :return: pandas Series with ticker symbols as index and closing values as values
+    :rtype: pd.Series
+    """
+    # Convert date to just the date part if it's a datetime
+    if isinstance(date, dt.datetime):
+        date = date.date()
+
+    result = {}
+
+    for ticker in tickers:
+        # Handle special case for cash
+        if ticker == cash:
+            result[ticker] = 1.0
+            continue
+
+        # Query for the closing value on the specified date
+        # We need to match on the date part of the datetime string
+        cursor.execute(
+            """
+            SELECT close FROM candles
+            WHERE symbol = ? AND date(date) = date(?)
+            ORDER BY date DESC
+            LIMIT 1
+            """,
+            (ticker, date.isoformat()),
+        )
+        row = cursor.fetchone()
+
+        if row:
+            result[ticker] = float(row[0])
+        else:
+            result[ticker] = None
+
+    return pd.Series(result)
+
+
 def get_securities_in_account(cursor: sqlite3.Cursor, account_id: int) -> list[str]:
     """
     Returns a list of all unique security symbols that have appeared in any transaction
@@ -731,6 +778,91 @@ def print_accounts(cursor: sqlite3.Cursor) -> None:
     print()
 
 
+def print_candles(cursor: sqlite3.Cursor, ticker: str | None = None) -> None:
+    """
+    Prints candle (OHLCV) data for a specific ticker or all tickers.
+    Creates a DataFrame with candle data.
+
+    :param cursor: cursor for database connection
+    :type cursor: sqlite3.Cursor
+    :param ticker: ticker symbol to display (if None, displays all tickers)
+    :type ticker: str | None
+    """
+    if ticker:
+        # Query for specific ticker
+        cursor.execute(
+            """
+            SELECT date, symbol, open, close, high, low, volume
+            FROM candles
+            WHERE symbol = ?
+            ORDER BY date DESC
+            """,
+            (ticker,),
+        )
+        rows = cursor.fetchall()
+
+        if not rows:
+            print(f"No candle data found for ticker: {ticker}")
+            # Check if ticker exists in tickers table
+            cursor.execute("SELECT symbol FROM tickers WHERE symbol = ?", (ticker,))
+            if cursor.fetchone():
+                print(f"  (Ticker {ticker} exists in database but has no candle data)")
+            else:
+                print(f"  (Ticker {ticker} not found in database)")
+            return
+
+        # Convert to pandas DataFrame
+        data = {
+            "date": [],
+            "open": [],
+            "high": [],
+            "low": [],
+            "close": [],
+            "volume": [],
+        }
+        for row in rows:
+            # Extract just the date part (YYYY-MM-DD) from the datetime
+            date_only = row["date"].split("T")[0] if "T" in row["date"] else row["date"].split()[0]
+            data["date"].append(date_only)
+            data["open"].append(row["open"])
+            data["high"].append(row["high"])
+            data["low"].append(row["low"])
+            data["close"].append(row["close"])
+            data["volume"].append(row["volume"])
+
+        df = pd.DataFrame(data)
+
+        print(f"\nCandle data for {ticker} ({len(df)} records):")
+        print(df.to_string(index=False))
+
+    else:
+        # Query for all tickers
+        cursor.execute(
+            """
+            SELECT symbol, COUNT(*) as count, MIN(date) as first_date, MAX(date) as last_date
+            FROM candles
+            GROUP BY symbol
+            ORDER BY symbol
+            """
+        )
+        rows = cursor.fetchall()
+
+        if not rows:
+            print("No candle data found in database.")
+            return
+
+        print("\nCandle data summary:")
+        print(f"{'Symbol':<10} {'Count':<10} {'First Date':<12} {'Last Date':<12}")
+        print("-" * 50)
+        for row in rows:
+            symbol = row["symbol"]
+            count = row["count"]
+            first_date = row["first_date"].split("T")[0] if "T" in row["first_date"] else row["first_date"].split()[0]
+            last_date = row["last_date"].split("T")[0] if "T" in row["last_date"] else row["last_date"].split()[0]
+            print(f"{symbol:<10} {count:<10} {first_date:<12} {last_date:<12}")
+        print()
+
+
 def print_summary(cursor: sqlite3.Cursor, account_filters: list[str] | None = None):
     """
     Prints latest positions for each account, showing all position rows for the most recent date.
@@ -827,6 +959,12 @@ if __name__ == "__main__":
         help="Only act on this account name. Can be specified multiple times. (default: act on all accounts)",
     )
     parser.add_argument(
+        "--ticker",
+        default=None,
+        type=str,
+        help="Ticker symbol for candles action. (default: show all tickers)",
+    )
+    parser.add_argument(
         "action",
         type=str,
         choices=[
@@ -875,6 +1013,6 @@ if __name__ == "__main__":
         case "transactions":
             print_transactions(cursor, args.account)
         case "candles":
-            print_candles(cursor, args.account)
+            print_candles(cursor, args.ticker)
         case _:
             print("inconcievable")
