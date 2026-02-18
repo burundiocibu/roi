@@ -65,6 +65,10 @@ def compute_cost_basis_forward(
             quantity = float(t["Quantity"])
             price = float(t["price"])
 
+            # This is to handle the
+            if len(symbol) == 9:
+                price = 1
+
             if symbol in symbols:
                 old_cb = running_cost_basis[symbol]
 
@@ -416,17 +420,17 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     return history
 
 
-def cost_basis(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def cost_basis(all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"Cost basis for {account}:\n{history["cost_basis"]}")
 
 
-def show_positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def show_positions(all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"Positions for {account}:\n{history["positions"]}")
 
 
-def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def summary(all_history: dict) -> None:
     for account, history in all_history.items():
         positions = history["positions"]
         print(f"Summary for {account}:")
@@ -439,14 +443,7 @@ def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
         positions = history["positions"]
         cost_basis_data = history["cost_basis"]
 
-        # Filter for specific ticker if requested
-        if args.ticker:
-            if args.ticker not in positions.columns:
-                print(f"Account: {account} - Ticker {args.ticker} not found in this account")
-                continue
-            symbols = [args.ticker]
-        else:
-            symbols = positions.columns
+        symbols = positions.columns
 
         # Create ROI dataframe
         roi_df = pd.DataFrame(index=positions.index, columns=symbols)
@@ -501,7 +498,115 @@ def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
             print(roi_df)
 
 
-def income(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    """Compute ROI for each interval period (since the previous period).
+    This shows the performance gain/loss for each discrete time period.
+    Uses cost basis changes and market value changes to calculate interval returns.
+    """
+    for account, history in all_history.items():
+        positions = history["positions"]
+        cost_basis_data = history["cost_basis"]
+        stg = history["stg"]
+        ltg = history["ltg"]
+        income_data = history["income"]
+        fees = history["fees"]
+        distributions = history["distributions"]
+
+        symbols = positions.columns
+
+        # Create value dataframe for market values
+        value_df = pd.DataFrame(index=positions.index, columns=symbols)
+        value_df[:] = 0.0
+
+        # Create interval ROI dataframe
+        interval_roi_df = pd.DataFrame(index=positions.index, columns=symbols)
+        interval_roi_df[:] = 0.0
+
+        # Calculate market values for each period
+        for date_idx in positions.index:
+            closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
+            for symbol in symbols:
+                quantity = positions.loc[date_idx, symbol]
+                value_df.loc[date_idx, symbol] = quantity * closings[symbol]
+
+        # Calculate ROI for each interval
+        for i in range(len(positions.index)):
+            curr_date = positions.index[i]
+
+            for symbol in symbols:
+                # Ending value and cost basis for this period
+                end_value = value_df.loc[curr_date, symbol]
+                end_cost_basis = cost_basis_data.loc[curr_date, symbol]
+
+                if i == 0:
+                    # First period - use cost basis as the starting value
+                    if end_cost_basis != 0:
+                        interval_roi_df.loc[curr_date, symbol] = (end_value - end_cost_basis) / end_cost_basis * 100
+                    else:
+                        interval_roi_df.loc[curr_date, symbol] = 0.0
+                else:
+                    # Subsequent periods - compare to previous period
+                    prev_date = positions.index[i - 1]
+
+                    # Starting value and cost basis for this period
+                    start_value = value_df.loc[prev_date, symbol]
+                    start_cost_basis = cost_basis_data.loc[prev_date, symbol]
+
+                    # Change in cost basis represents net investment/divestment during period
+                    cost_basis_change = end_cost_basis - start_cost_basis
+
+                    # For interval ROI, we want to measure the return on the capital at risk
+                    # at the beginning of the period
+                    # ROI = (End Value - Start Value - Cost Basis Change) / Start Value
+                    # The cost_basis_change accounts for:
+                    # - New purchases (increases CB)
+                    # - Sales (decreases CB)
+                    # - Reinvested income (already in CB)
+                    # - Distributions (already in CB)
+
+                    if start_value != 0:
+                        interval_roi_df.loc[curr_date, symbol] = (end_value - start_value - cost_basis_change) / start_value * 100
+                    else:
+                        # If starting value is zero, check if this is the first time holding
+                        if start_cost_basis == 0 and end_cost_basis != 0:
+                            # First time holding - use cost basis as starting value
+                            interval_roi_df.loc[curr_date, symbol] = (end_value - end_cost_basis) / end_cost_basis * 100
+                        elif end_value != 0:
+                            interval_roi_df.loc[curr_date, symbol] = float("inf")
+                        else:
+                            interval_roi_df.loc[curr_date, symbol] = 0.0
+
+        if args.ticker:
+            # Create detailed view for single ticker
+            ticker = args.ticker
+
+            # Get closing prices for all periods
+            closing_prices = pd.Series(index=positions.index, dtype=float)
+            for date_idx in positions.index:
+                closings = lmidb.get_closing_values(cursor, [ticker], date_idx)
+                closing_prices[date_idx] = closings[ticker]
+
+            # Total income is the sum of short-term gains, long-term gains, and income
+            total_income = stg[ticker] + ltg[ticker] + income_data[ticker]
+
+            detail_df = pd.DataFrame(
+                {
+                    "Quantity": positions[ticker],
+                    "Price": closing_prices,
+                    "Cost Basis": cost_basis_data[ticker],
+                    "Market Value": value_df[ticker],
+                    "Income": total_income,
+                    "Interval ROI %": interval_roi_df[ticker],
+                }
+            )
+            print(f"Account: {account} - Ticker: {ticker} - Interval ROI")
+            print(detail_df)
+        else:
+            print(f"Account: {account} Interval ROI (%)")
+            print(interval_roi_df)
+
+
+def income(all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"{account} income:")
         print(history["income"])
@@ -556,6 +661,7 @@ def main():
             "income",
             "summary",
             "roi",
+            "interval-roi",
         ],
         help="Action to take.",
     )
@@ -581,15 +687,17 @@ def main():
 
     match args.action:
         case "cost-basis":
-            cost_basis(cursor, all_history)
+            cost_basis(all_history)
         case "summary":
-            summary(cursor, all_history)
+            summary(all_history)
         case "positions":
-            show_positions(cursor, all_history)
+            show_positions(all_history)
         case "roi":
             roi(cursor, all_history)
+        case "interval-roi":
+            interval_roi(cursor, all_history)
         case "income":
-            income(cursor, all_history)
+            income(all_history)
         case _:
             print("inconcievable")
 
