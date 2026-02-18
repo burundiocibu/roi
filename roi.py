@@ -9,6 +9,86 @@ import sqlite3
 import lmidb
 
 
+def compute_cost_basis_forward(
+    cursor: sqlite3.Cursor, account_id: int, dtie: pd.Series, symbols: list[str], positions: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Compute cost basis by going forward in time from the first transaction.
+    Uses the positions DataFrame to get quantities at each point in time.
+    For sells, we reduce cost basis proportionally based on shares sold.
+    """
+    cost_basis = pd.DataFrame(index=dtie, columns=symbols)
+    cost_basis[:] = 0.0
+
+    # Get all transactions in chronological order (forward in time)
+    cursor.execute(f"SELECT * FROM transactions_{account_id} ORDER BY Date ASC")
+    transactions = cursor.fetchall()
+
+    # Track running cost basis for each security
+    # Quantities come from the positions DataFrame
+    running_cost_basis = {symbol: 0.0 for symbol in symbols}
+    transaction_idx = 0
+
+    for month_end in dtie:
+        # Process all transactions up to and including this month end
+        while transaction_idx < len(transactions):
+            t = transactions[transaction_idx]
+            tdate = dt.datetime.fromisoformat(t["date"][:10]).date()
+
+            if tdate > month_end:
+                break
+
+            action = t["Action"]
+            symbol = t["Symbol"]
+            quantity = float(t["Quantity"])
+            price = float(t["price"])
+
+            if symbol in symbols:
+                old_cb = running_cost_basis[symbol]
+
+                # Get quantity from positions DataFrame (computed backwards in compute_history)
+                # Look up the position at the current month_end
+                qty_at_month_end = positions.loc[month_end, symbol]
+
+                # fmt: off
+                match action:
+                    case "Buy":
+                        running_cost_basis[symbol] += quantity * price
+                    case "Reinvest Shares":
+                        running_cost_basis[symbol] += quantity * price
+                    case "Reinvestment Adj":
+                        running_cost_basis[symbol] += quantity * price
+                    case "Sell":
+                        # For sells, we need the quantity BEFORE the sell
+                        # Since positions are at month-end, we need qty + sell_quantity
+                        qty_before_sell = qty_at_month_end + quantity
+                        if qty_before_sell > 0 and running_cost_basis[symbol] > 0:
+                            avg_cost_per_share = running_cost_basis[symbol] / qty_before_sell
+                            running_cost_basis[symbol] -= quantity * avg_cost_per_share
+                        elif args.debug:
+                            print(f"Warning: Sell with no shares held for {symbol} on {tdate}")
+                    case "Stock Split":
+                        # Stock splits don't change cost basis
+                        pass
+                # fmt: on
+
+                # Debug output for ticker if specified
+                if args.ticker and symbol == args.ticker and running_cost_basis[symbol] != old_cb:
+                    if args.debug:
+                        avg_cost = running_cost_basis[symbol] / qty_at_month_end if qty_at_month_end > 0 else 0
+                        print(
+                            f"{tdate}: {action:25} Q:{quantity:8.2f} P:{price:8.2f} Qty@MonthEnd: {qty_at_month_end:7.2f} CB: {old_cb:10.2f} -> {running_cost_basis[symbol]:10.2f} (Avg: ${avg_cost:.2f})"
+                        )
+
+            transaction_idx += 1
+
+        # Record the cost basis at this month end
+        for symbol in symbols:
+            cost_basis.loc[month_end, symbol] = running_cost_basis[symbol]
+
+    return cost_basis
+
+
 def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dict:
     account_filters = args.account
     # Get all accounts from the database
@@ -82,9 +162,6 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     mgmt_fees[:] = 0
     distributions = pd.Series(index=dtie)
     distributions[:] = 0
-    cost_basis = pd.DataFrame(index=dtie, columns=symbols)
-    cost_basis[:] = 0.0
-
     # start of month, end of month, and end of previous month
     months = pd.concat([dtis, dtie, dtie.shift(1)], axis=1)[::-1]
     for i, m in months.iterrows():
@@ -92,7 +169,6 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
             break
         month = m[2]
         positions.loc[month] = positions.loc[m[1]]
-        cost_basis.loc[month] = cost_basis.loc[m[1]]
 
         cursor.execute(
             f"SELECT * FROM transactions_{account_id} WHERE Date >= ? AND Date <= ? ORDER BY Date DESC",
@@ -115,7 +191,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 )
                 if symbol != "":
                     print(
-                        f" --- {symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f} cb:{cost_basis.loc[month, symbol]} -> ",
+                        f" --- {symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f} -> ",
                         end="",
                     )
                 else:
@@ -141,8 +217,6 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 case "Buy":
                     positions.loc[month, symbol] -= quantity # type: ignore
                     positions.loc[month, cash] -= amount
-                    # Update cost basis (subtract because going backwards)
-                    cost_basis.loc[month, symbol] -= quantity * price  # type: ignore
                 case "Cash Dividend":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
@@ -178,22 +252,16 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 case "Reinvest Shares":
                     positions.loc[month, cash] -= amount
                     positions.loc[month, symbol] -= quantity # type: ignore
-                    # Update cost basis (subtract because going backwards)
-                    cost_basis.loc[month, symbol] -= quantity * price  # type: ignore
                 case "Reinvestment Adj":
                     positions.loc[month, symbol] -= quantity # type: ignore
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    # Update cost basis (subtract because going backwards)
-                    cost_basis.loc[month, symbol] -= quantity * price  # type: ignore
                 case "Security Transfer":
                     positions.loc[month, cash] -= amount
                 case "Sell":
                     positions.loc[month, symbol] += quantity # type: ignore
                     positions.loc[month, cash] -= amount
                     long_term_gains.loc[month, symbol] += amount # type: ignore
-                    # Update cost basis (add because going backwards)
-                    cost_basis.loc[month, symbol] += quantity * price  # type: ignore
                 case "Short Term Cap Gain":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
@@ -219,25 +287,12 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
             # fmt: off
             if args.debug:
                 if symbol != "":
-                    print(f"{symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f}, cb:{cost_basis.loc[month, symbol]}")
+                    print(f"{symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f}")
                 else:
                     print(f"{cash}:{positions.loc[month, cash]:.2f}")
 
-    # fix cost basis for securities
-    if args.action == "cost-basis":
-        print(f"initial cost_basis:\n{cost_basis}")
-    cbi = cost_basis.columns[positions.iloc[0] == 0]
-    oldest_cost_basis = cost_basis.iloc[0][cbi].copy()
-    for i in range(len(cost_basis) - 1, -1, -1):
-        cost_basis.loc[cost_basis.index[i], cbi] -= oldest_cost_basis
-    # for securities that have been held for the entire period, assume that the value
-    # at the start of the period was the initial cost basis. Yeah, its not perfect.
-    cb2 = cost_basis.columns[(positions.iloc[0] > 0) & (positions.iloc[-1] > 0)]
-    closings = lmidb.get_closing_values(cursor, list(cb2), cost_basis.iloc[0].name)  # type: ignore
-    adj = positions[cb2].iloc[0] * closings - cost_basis[cb2].iloc[0]
-    cost_basis[cb2] += adj
-    # This still doesn't work for a security is introduced and removed from the portfolio
-    # during the period of analysis.
+    # Compute cost basis forward in time (needs positions for quantity tracking)
+    cost_basis = compute_cost_basis_forward(cursor, account_id, dtie, symbols, positions)
 
     # resample the history on the indicated interval
     if args.interval != "ME":
@@ -282,7 +337,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
         long_term_gains.index = long_term_gains.index.strftime("%Y-%m-%d")
         long_term_gains.loc["Total"] = long_term_gains_total
 
-    if args.active:
+    if not args.all:
         # Only include securities still in account
         lp = positions.iloc[-1]
         lpi = lp[lp != 0].index
@@ -311,10 +366,6 @@ def cost_basis(cursor: sqlite3.Cursor, all_history: dict) -> None:
         print(f"Account: {account} cost_basis\n{history["cost_basis"]}")
 
 
-def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
-    pass
-
-
 def positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"Account: {account}\n{history["positions"]}")
@@ -328,6 +379,73 @@ def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
         print(positions.iloc[-1].to_frame().T)
 
 
+def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    for account, history in all_history.items():
+        positions = history["positions"]
+        cost_basis_data = history["cost_basis"]
+
+        # Filter for specific ticker if requested
+        if args.ticker:
+            if args.ticker not in positions.columns:
+                print(f"Account: {account} - Ticker {args.ticker} not found in this account")
+                continue
+            symbols = [args.ticker]
+        else:
+            symbols = positions.columns
+
+        # Create ROI dataframe
+        roi_df = pd.DataFrame(index=positions.index, columns=symbols)
+        roi_df[:] = 0.0
+
+        # Create value dataframe for market values
+        value_df = pd.DataFrame(index=positions.index, columns=symbols)
+        value_df[:] = 0.0
+
+        # Calculate ROI and values for each period
+        for date_idx in positions.index:
+            # Get closing prices for this date
+            closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
+
+            for symbol in symbols:
+                quantity = positions.loc[date_idx, symbol]
+                cost_basis_val = cost_basis_data.loc[date_idx, symbol]
+
+                # Current market value
+                current_value = quantity * closings[symbol]
+                value_df.loc[date_idx, symbol] = current_value
+
+                if quantity != 0 and cost_basis_val != 0:
+                    # ROI as percentage
+                    roi_df.loc[date_idx, symbol] = (current_value - cost_basis_val) / cost_basis_val * 100
+                else:
+                    roi_df.loc[date_idx, symbol] = 0.0
+
+        if args.ticker:
+            # Create detailed view for single ticker
+            ticker = args.ticker
+
+            # Get closing prices for all periods
+            closing_prices = pd.Series(index=positions.index, dtype=float)
+            for date_idx in positions.index:
+                closings = lmidb.get_closing_values(cursor, [ticker], date_idx)
+                closing_prices[date_idx] = closings[ticker]
+
+            detail_df = pd.DataFrame(
+                {
+                    "Quantity": positions[ticker],
+                    "Price": closing_prices,
+                    "Cost Basis": cost_basis_data[ticker],
+                    "Market Value": value_df[ticker],
+                    "ROI %": roi_df[ticker],
+                }
+            )
+            print(f"Account: {account} - Ticker: {ticker}")
+            print(detail_df)
+        else:
+            print(f"Account: {account} ROI (%)")
+            print(roi_df)
+
+
 def income(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         print(f"{account} income:")
@@ -336,7 +454,7 @@ def income(cursor: sqlite3.Cursor, all_history: dict) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Invest Performance Calculator",
+        description="Investment Performance Calculator",
         epilog="Use Schwab investment account credentials if prompted for a login.",
     )
     parser.add_argument(
@@ -356,10 +474,10 @@ def main():
     )
     parser.add_argument(
         "-a",
-        "--active",
+        "--all",
         action="store_true",
         default=False,
-        help="Only show information for securities in the account at the most recent position.",
+        help="Process all securities ever held.",
     )
     parser.add_argument(
         "--account",
@@ -367,6 +485,12 @@ def main():
         default=None,
         type=str,
         help="Only act on this account name. Can be specified multiple times. (default: act on all accounts)",
+    )
+    parser.add_argument(
+        "--ticker",
+        default=None,
+        type=str,
+        help="Focus on a specific ticker symbol. (default: show all securities)",
     )
     parser.add_argument(
         "action",

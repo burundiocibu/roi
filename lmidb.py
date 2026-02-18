@@ -502,7 +502,8 @@ def update_candles(cursor: sqlite3.Cursor) -> None:
 def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date | dt.datetime) -> pd.Series:
     """
     Returns the closing values for a list of tickers for a single date as a pandas Series.
-    If no data exists for a ticker on that date, NaN is returned for that ticker.
+    If no data exists for a ticker on that exact date, returns the most recent closing
+    value before that date. If no data exists at all, NaN is returned for that ticker.
 
     :param cursor: cursor for database connection
     :type cursor: sqlite3.Cursor
@@ -525,12 +526,12 @@ def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date
             result[ticker] = 1.0
             continue
 
-        # Query for the closing value on the specified date
-        # We need to match on the date part of the datetime string
+        # Query for the closing value on or before the specified date
+        # Get the most recent closing price that is on or before the target date
         cursor.execute(
             """
             SELECT close FROM candles
-            WHERE symbol = ? AND date(date) = date(?)
+            WHERE symbol = ? AND date(date) <= date(?)
             ORDER BY date DESC
             LIMIT 1
             """,
