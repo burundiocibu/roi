@@ -10,23 +10,45 @@ import lmidb
 
 
 def compute_cost_basis_forward(
-    cursor: sqlite3.Cursor, account_id: int, dtie: pd.Series, symbols: list[str], positions: pd.DataFrame
+    cursor: sqlite3.Cursor, account_id: int, symbols: list[str], positions: pd.DataFrame
 ) -> pd.DataFrame:
     """
     Compute cost basis by going forward in time from the first transaction.
     Uses the positions DataFrame to get quantities at each point in time.
     For sells, we reduce cost basis proportionally based on shares sold.
     """
+    dtie = positions.index
     cost_basis = pd.DataFrame(index=dtie, columns=symbols)
     cost_basis[:] = 0.0
 
     # Get all transactions in chronological order (forward in time)
-    cursor.execute(f"SELECT * FROM transactions_{account_id} ORDER BY Date ASC")
+    # Filter to only the specified ticker if provided
+    if args.ticker:
+        cursor.execute(f"SELECT * FROM transactions_{account_id} WHERE Symbol = ? OR Symbol = '' ORDER BY Date ASC", (args.ticker,))
+    else:
+        cursor.execute(f"SELECT * FROM transactions_{account_id} ORDER BY Date ASC")
     transactions = cursor.fetchall()
 
     # Track running cost basis for each security
     # Quantities come from the positions DataFrame
     running_cost_basis = {symbol: 0.0 for symbol in symbols}
+
+    # Initialize cost basis for securities held at the start of the period
+    # For these, we use the market value at the first month-end as initial cost basis
+    first_month_end = dtie[0]
+    for symbol in symbols:
+        qty_at_start = positions.loc[first_month_end, symbol]
+        if qty_at_start > 0:  # type: ignore
+            # This security was held before transaction data starts
+            # Use market value at start as initial cost basis
+            closing_prices = lmidb.get_closing_values(cursor, [symbol], first_month_end)
+            initial_value = qty_at_start * closing_prices[symbol]
+            running_cost_basis[symbol] = initial_value
+            if args.ticker and symbol == args.ticker and args.debug:
+                print(
+                    f"Initializing cost basis for {symbol}: {qty_at_start:.2f} shares @ ${closing_prices[symbol]:.2f} = ${initial_value:.2f}"
+                )
+
     transaction_idx = 0
 
     for month_end in dtie:
@@ -58,6 +80,10 @@ def compute_cost_basis_forward(
                         running_cost_basis[symbol] += quantity * price
                     case "Reinvestment Adj":
                         running_cost_basis[symbol] += quantity * price
+                    case "Security Transfer":
+                        if price == 0:
+                            price = lmidb.get_closing_values(cursor, [symbol], first_month_end)[symbol]
+                        running_cost_basis[symbol] += quantity * price 
                     case "Sell":
                         # For sells, we need the quantity BEFORE the sell
                         # Since positions are at month-end, we need qty + sell_quantity
@@ -124,25 +150,45 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     result = cursor.fetchone()
     first_transaction_date = dt.datetime.fromisoformat(result["first_date"])
 
-    cursor.execute(
-        f"""
-        SELECT * FROM positions_{account_id} 
-        WHERE Date = (SELECT MAX(Date) FROM positions_{account_id})
-    """
-    )
+    # Get latest positions, optionally filtered by ticker
+    if args.ticker:
+        cursor.execute(
+            f"""
+            SELECT * FROM positions_{account_id} 
+            WHERE Date = (SELECT MAX(Date) FROM positions_{account_id})
+            AND Symbol = ?
+        """,
+            (args.ticker,),
+        )
+    else:
+        cursor.execute(
+            f"""
+            SELECT * FROM positions_{account_id} 
+            WHERE Date = (SELECT MAX(Date) FROM positions_{account_id})
+        """
+        )
     latest_position_df = pd.DataFrame([dict(row) for row in cursor])
-    latest_position_date = dt.datetime.fromisoformat(latest_position_df["date"][0])
 
-    # start dataframe with the oldest transaction
-    start_date = dt.date(first_transaction_date.year, first_transaction_date.month, 1)
+    if len(latest_position_df) > 0:
+        latest_position_date = dt.datetime.fromisoformat(latest_position_df["date"][0])
+    else:
+        # No position data for this ticker, use transaction date range
+        cursor.execute(f"SELECT MAX(Date) as last_date FROM transactions_{account_id}")
+        result = cursor.fetchone()
+        latest_position_date = dt.datetime.fromisoformat(result["last_date"])
+
+    # start dataframe with last day of the month previous to the last transaction
     # end with the most recent position
-    dtis = pd.Series(pd.date_range(start=start_date, end=latest_position_date, freq="MS").date)
+    start_date = dt.date(first_transaction_date.year, first_transaction_date.month, 1) - dt.timedelta(days=1)
     dtie = list(pd.date_range(start=start_date, end=latest_position_date, freq="ME").date)
     if dtie[-1] < latest_position_date.date():
         dtie.append(latest_position_date.date())
     dtie = pd.Series(dtie)
 
-    symbols = lmidb.get_securities_in_account(cursor, account_id)
+    if args.ticker:
+        symbols = [args.ticker, lmidb.cash]  # Always include cash
+    else:
+        symbols = lmidb.get_securities_in_account(cursor, account_id)
     positions = pd.DataFrame(index=dtie, columns=symbols)
 
     # initialize the end of positions datafrom with the latest position data
@@ -162,18 +208,23 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     mgmt_fees[:] = 0
     distributions = pd.Series(index=dtie)
     distributions[:] = 0
-    # start of month, end of month, and end of previous month
-    months = pd.concat([dtis, dtie, dtie.shift(1)], axis=1)[::-1]
-    for i, m in months.iterrows():
-        if m[2] == None:
-            break
-        month = m[2]
-        positions.loc[month] = positions.loc[m[1]]
+    for m in dtie[:0:-1]:
+        som = dt.date(m.year, m.month, 1)
+        month = som - dt.timedelta(days=1)
+        lp = len(positions)
+        positions.loc[month] = positions.loc[m]  # type: ignore
 
-        cursor.execute(
-            f"SELECT * FROM transactions_{account_id} WHERE Date >= ? AND Date <= ? ORDER BY Date DESC",
-            (m[0].isoformat(), m[1].isoformat()),
-        )
+        # Get transactions for the month after month, optionally filtered by ticker
+        if args.ticker:
+            cursor.execute(
+                f"SELECT * FROM transactions_{account_id} WHERE Date >= ? AND Date <= ? AND (Symbol = ? OR Symbol = '') ORDER BY Date DESC",
+                (som.isoformat(), m.isoformat(), args.ticker),
+            )
+        else:
+            cursor.execute(
+                f"SELECT * FROM transactions_{account_id} WHERE Date >= ? AND Date <= ? ORDER BY Date DESC",
+                (som.isoformat(), m.isoformat()),
+            )
 
         for t in cursor:
             action = t["Action"]
@@ -184,6 +235,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
             price = float(t["price"])
             # If price is zero, assume it has a value of 1
             tdate = t["date"][:10]
+
+            # Skip non-ticker transactions when focusing on a single ticker
+            if args.ticker and symbol != args.ticker:
+                continue
             if args.debug:
                 print(
                     f"Transaction: {tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}",
@@ -258,6 +313,8 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                     short_term_gains.loc[month, symbol] += amount  # type: ignore
                 case "Security Transfer":
                     positions.loc[month, cash] -= amount
+                    if symbol != "":
+                        positions.loc[month, symbol] -= quantity # type: ignore
                 case "Sell":
                     positions.loc[month, symbol] += quantity # type: ignore
                     positions.loc[month, cash] -= amount
@@ -290,9 +347,8 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                     print(f"{symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f}")
                 else:
                     print(f"{cash}:{positions.loc[month, cash]:.2f}")
-
     # Compute cost basis forward in time (needs positions for quantity tracking)
-    cost_basis = compute_cost_basis_forward(cursor, account_id, dtie, symbols, positions)
+    cost_basis = compute_cost_basis_forward(cursor, account_id, symbols, positions)
 
     # resample the history on the indicated interval
     if args.interval != "ME":
@@ -361,20 +417,19 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
 
 
 def cost_basis(cursor: sqlite3.Cursor, all_history: dict) -> None:
-    global cost_basis, positions
     for account, history in all_history.items():
-        print(f"Account: {account} cost_basis\n{history["cost_basis"]}")
+        print(f"Cost basis for {account}:\n{history["cost_basis"]}")
 
 
-def positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def show_positions(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
-        print(f"Account: {account}\n{history["positions"]}")
+        print(f"Positions for {account}:\n{history["positions"]}")
 
 
 def summary(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         positions = history["positions"]
-        print(f"Account: {account}")
+        print(f"Summary for {account}:")
         print(positions.iloc[0].to_frame().T)
         print(positions.iloc[-1].to_frame().T)
 
@@ -530,7 +585,7 @@ def main():
         case "summary":
             summary(cursor, all_history)
         case "positions":
-            positions(cursor, all_history)
+            show_positions(cursor, all_history)
         case "roi":
             roi(cursor, all_history)
         case "income":
