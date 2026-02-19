@@ -183,12 +183,8 @@ def compute_cost_basis_forward(
                         running_cost_basis[symbol] += quantity * price
                     case "Journaled Shares":
                         if price == 0:
-                            # Use quantity-based proportion of value from pre-computed value DataFrame
-                            qty_at_first = positions.loc[first_month_end, symbol]
-                            if qty_at_first > 0:
-                                running_cost_basis[symbol] += (
-                                    quantity * value.loc[first_month_end, symbol] / qty_at_first
-                                )
+                            candle_price = lmidb.get_closing_values(cursor, [symbol], tdate)[symbol]
+                            running_cost_basis[symbol] += quantity * candle_price
                         else:
                             running_cost_basis[symbol] += quantity * price
                     case "Reinvest Shares":
@@ -197,14 +193,10 @@ def compute_cost_basis_forward(
                         running_cost_basis[symbol] += quantity * price
                     case "Security Transfer":
                         if price == 0:
-                            # Use quantity-based proportion of value from pre-computed value DataFrame
-                            qty_at_first = positions.loc[first_month_end, symbol]
-                            if qty_at_first > 0:
-                                running_cost_basis[symbol] += (
-                                    quantity * value.loc[first_month_end, symbol] / qty_at_first
-                                )
+                            candle_price = lmidb.get_closing_values(cursor, [symbol], tdate)[symbol]
+                            running_cost_basis[symbol] += quantity * candle_price
                         else:
-                            running_cost_basis[symbol] += quantity * price 
+                            running_cost_basis[symbol] += quantity * price
                     case "Sell":
                         # For sells, we need the quantity BEFORE the sell
                         # Since positions are at month-end, we need qty + sell_quantity
@@ -578,18 +570,6 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
         value_temp.index = pd.to_datetime(value_temp.index)
         value = value_temp.resample(args.interval).last()
 
-    if False:
-        # add totals to the income, short_term_gains, and long_term_gains
-        income_total = income.sum()
-        income.index = income.index.strftime("%Y-%m-%d")
-        income.loc["Total"] = income_total
-        short_term_gains_total = short_term_gains.sum()
-        short_term_gains.index = short_term_gains.index.strftime("%Y-%m-%d")
-        short_term_gains.loc["Total"] = short_term_gains_total
-        long_term_gains_total = long_term_gains.sum()
-        long_term_gains.index = long_term_gains.index.strftime("%Y-%m-%d")
-        long_term_gains.loc["Total"] = long_term_gains_total
-
     if not args.all:
         # Only include securities still in account
         lp = positions.iloc[-1]
@@ -604,8 +584,19 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     # Add Total column to value after filtering
     value["Total"] = value.sum(axis=1)
 
+    # Add Total column to cost_basis after filtering
+    cost_basis["Total"] = cost_basis.sum(axis=1)
+
+    # Add Total column to income after filtering
+    income["Total"] = income.sum(axis=1)
+
     # Compute cumulative ROI
     cumulative_roi = compute_cumulative_roi(cursor, positions, cost_basis)
+
+    # Add Total ROI column - overall portfolio return
+    total_cost_basis = cost_basis["Total"]
+    total_value = value["Total"]
+    cumulative_roi["Total"] = ((total_value - total_cost_basis) / total_cost_basis * 100).where(total_cost_basis != 0, 0.0)
 
     history = {
         "positions": positions,
@@ -646,15 +637,15 @@ def summary(all_history: dict) -> None:
         print(f"\nSummary for {account}:")
         print("\nFirst Period Value:")
         print(value.iloc[0].to_frame().T)
-        print(f"Total Value: ${value.iloc[0].sum():.2f}")
+        print(f"Total Value: ${value.iloc[0]['Total']:.2f}")
 
         print("\nMost Recent Period Value:")
         print(value.iloc[-1].to_frame().T)
-        print(f"Total Value: ${value.iloc[-1].sum():.2f}")
-        print(f"Total Cost Basis: ${cost_basis_data.iloc[-1].sum():.2f}")
+        print(f"Total Value: ${value.iloc[-1]['Total']:.2f}")
+        print(f"Total Cost Basis: ${cost_basis_data.iloc[-1]['Total']:.2f}")
 
-        total_gain = value.iloc[-1].sum() - cost_basis_data.iloc[-1].sum()
-        total_roi = (total_gain / cost_basis_data.iloc[-1].sum() * 100) if cost_basis_data.iloc[-1].sum() != 0 else 0.0
+        total_gain = value.iloc[-1]["Total"] - cost_basis_data.iloc[-1]["Total"]
+        total_roi = (total_gain / cost_basis_data.iloc[-1]["Total"] * 100) if cost_basis_data.iloc[-1]["Total"] != 0 else 0.0
         print(f"Total Gain/Loss: ${total_gain:.2f}")
         print(f"Total ROI: {total_roi:.2f}%")
 
@@ -817,7 +808,7 @@ def income(all_history: dict) -> None:
         print(history["income"])
 
 
-def full_report(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def full_report(all_history: dict) -> None:
     """Print a comprehensive report including cumulative ROI, value, income, and summary."""
     for account, history in all_history.items():
         print(f"Full Report for: {account}")
@@ -829,19 +820,40 @@ def full_report(cursor: sqlite3.Cursor, all_history: dict) -> None:
         income_data = history["income"]
 
         print(f"\nMost Recent Period Value:\n{value.iloc[-1].to_frame().T}")
-        print(f"Total Value: ${value.iloc[-1].sum():.2f}")
-        print(f"Total Cost Basis: ${cost_basis_data.iloc[-1].sum():.2f}")
+        print(f"Total Value: ${value.iloc[-1]['Total']:.2f}")
+        print(f"Total Cost Basis: ${cost_basis_data.iloc[-1]['Total']:.2f}")
 
-        total_gain = value.iloc[-1].sum() - cost_basis_data.iloc[-1].sum()
-        total_roi = (total_gain / cost_basis_data.iloc[-1].sum() * 100) if cost_basis_data.iloc[-1].sum() != 0 else 0.0
+        total_gain = value.iloc[-1]["Total"] - cost_basis_data.iloc[-1]["Total"]
+        total_roi = (total_gain / cost_basis_data.iloc[-1]["Total"] * 100) if cost_basis_data.iloc[-1]["Total"] != 0 else 0.0
         print(f"Total Gain/Loss: ${total_gain:.2f}")
         print(f"Total ROI: {total_roi:.2f}%")
 
-        print(f"\nPositions\n{positions}")
-        print(f"\nCost Basis\n{cost_basis_data}")
-        print(f"\nMarket Value\n{value}")
-        print(f"\nIncome\n{income_data}")
-        print(f"\nROI (%)\n{roi_df}\n")
+        # If showing a single ticker, combine all metrics into one dataframe
+        if args.ticker:
+            ticker = args.ticker
+            # Create combined dataframe with all metrics for this ticker
+            combined = pd.DataFrame(index=positions.index)
+            combined["Quantity"] = positions[ticker]
+            combined["Cost Basis"] = cost_basis_data[ticker]
+            combined["Market Value"] = value[ticker] if ticker in value.columns else value.get("Total", 0)
+            combined["Income"] = income_data[ticker]
+            combined["ROI %"] = roi_df[ticker]
+
+            # Add Total column if it exists in value
+            if "Total" in value.columns and ticker in value.columns:
+                combined["Total Value"] = value["Total"]
+                combined["Total Cost Basis"] = cost_basis_data["Total"]
+                combined["Total ROI %"] = roi_df["Total"]
+
+            print(f"\nCombined History for {ticker}:")
+            print(combined)
+        else:
+            # Show separate tables for all securities
+            print(f"\nPositions\n{positions}")
+            print(f"\nCost Basis\n{cost_basis_data}")
+            print(f"\nMarket Value\n{value}")
+            print(f"\nIncome\n{income_data}")
+            print(f"\nROI (%)\n{roi_df}\n")
 
 
 def main(enable_profiling=False):
@@ -941,7 +953,7 @@ def main(enable_profiling=False):
         case "income":
             income(all_history)
         case "full":
-            full_report(cursor, all_history)
+            full_report(all_history)
         case _:
             print("inconcievable")
 

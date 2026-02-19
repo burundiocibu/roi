@@ -576,7 +576,11 @@ def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date
 
         # Look up ticker in cache
         if ticker not in _candles_cache:
-            result[ticker] = None
+            # CUSIP securities (9-digit codes) use price=$1 when no candle data exists
+            if len(ticker) == 9 and ticker.isalnum():
+                result[ticker] = 1.0
+            else:
+                result[ticker] = None
             continue
 
         ticker_data = _candles_cache[ticker]
