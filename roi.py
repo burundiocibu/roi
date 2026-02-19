@@ -438,7 +438,7 @@ def summary(all_history: dict) -> None:
         print(positions.iloc[-1].to_frame().T)
 
 
-def roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         positions = history["positions"]
         cost_basis_data = history["cost_basis"]
@@ -693,7 +693,7 @@ def main():
         case "positions":
             show_positions(all_history)
         case "roi":
-            roi(cursor, all_history)
+            cumulitive_roi(cursor, all_history)
         case "interval-roi":
             interval_roi(cursor, all_history)
         case "income":
