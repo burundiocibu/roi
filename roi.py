@@ -690,7 +690,10 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
             print(detail_df)
         else:
             print(f"Account: {account} cumulitive ROI (%)")
-            print(roi_df)
+            if args.verbosity > 0:
+                print(roi_df)
+            else:
+                print(roi_df.iloc[[-1]])
 
 
 @timeit
@@ -819,15 +822,6 @@ def full_report(all_history: dict) -> None:
         roi_df = history["cumulative_roi"]
         income_data = history["income"]
 
-        print(f"\nMost Recent Period Value:\n{value.iloc[-1].to_frame().T}")
-        print(f"Total Value: ${value.iloc[-1]['Total']:.2f}")
-        print(f"Total Cost Basis: ${cost_basis_data.iloc[-1]['Total']:.2f}")
-
-        total_gain = value.iloc[-1]["Total"] - cost_basis_data.iloc[-1]["Total"]
-        total_roi = (total_gain / cost_basis_data.iloc[-1]["Total"] * 100) if cost_basis_data.iloc[-1]["Total"] != 0 else 0.0
-        print(f"Total Gain/Loss: ${total_gain:.2f}")
-        print(f"Total ROI: {total_roi:.2f}%")
-
         # If showing a single ticker, combine all metrics into one dataframe
         if args.ticker:
             ticker = args.ticker
@@ -849,11 +843,18 @@ def full_report(all_history: dict) -> None:
             print(combined)
         else:
             # Show separate tables for all securities
-            print(f"\nPositions\n{positions}")
-            print(f"\nCost Basis\n{cost_basis_data}")
-            print(f"\nMarket Value\n{value}")
-            print(f"\nIncome\n{income_data}")
-            print(f"\nROI (%)\n{roi_df}\n")
+            if args.verbosity > 0:
+                print(f"\nPositions\n{positions}")
+                print(f"\nCost Basis\n{cost_basis_data}")
+                print(f"\nMarket Value\n{value}")
+                print(f"\nIncome\n{income_data}")
+                print(f"\nROI (%)\n{roi_df}\n")
+            else:
+                print(f"\nPositions\n{positions.iloc[-1].to_frame().T}")
+                print(f"\nCost Basis\n{cost_basis_data.iloc[-1].to_frame().T}")
+                print(f"\nMarket Value\n{value.iloc[-1].to_frame().T}")
+                print(f"\nIncome\n{income_data.iloc[-1].to_frame().T}")
+                print(f"\nROI (%)\n{roi_df.iloc[-1].to_frame().T}\n")
 
 
 def main(enable_profiling=False):
@@ -896,6 +897,7 @@ def main(enable_profiling=False):
         help="Only act on this account name. Can be specified multiple times. (default: act on all accounts)",
     )
     parser.add_argument(
+        "-t",
         "--ticker",
         default=None,
         type=str,
@@ -916,6 +918,7 @@ def main(enable_profiling=False):
         ],
         help="Action to take.",
     )
+    parser.add_argument("-v", "--verbosity", action="count", default=0, help="Increase output verbosity.")
     global args
     args = parser.parse_args()
 
