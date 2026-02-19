@@ -261,6 +261,44 @@ def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.Data
 
 
 @timeit
+def compute_cumulative_roi(
+    cursor: sqlite3.Cursor,
+    positions: pd.DataFrame,
+    cost_basis_data: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute cumulative ROI for each security at each point in time.
+    Returns a DataFrame with ROI percentages showing the total return since
+    the initial investment for each security.
+    """
+    symbols = positions.columns
+
+    # Create ROI dataframe
+    roi_df = pd.DataFrame(index=positions.index, columns=symbols)
+    roi_df[:] = 0.0
+
+    # Calculate ROI for each period
+    for date_idx in positions.index:
+        # Get closing prices for this date
+        closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
+
+        for symbol in symbols:
+            quantity = positions.loc[date_idx, symbol]
+            cost_basis_val = cost_basis_data.loc[date_idx, symbol]
+
+            # Current market value
+            current_value = quantity * closings[symbol]
+
+            if quantity != 0 and cost_basis_val != 0:
+                # ROI as percentage
+                roi_df.loc[date_idx, symbol] = (current_value - cost_basis_val) / cost_basis_val * 100
+            else:
+                roi_df.loc[date_idx, symbol] = 0.0
+
+    return roi_df
+
+
+@timeit
 def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dict:
     account_filters = args.account
     # Get all accounts from the database
@@ -566,6 +604,9 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     # Add Total column to value after filtering
     value["Total"] = value.sum(axis=1)
 
+    # Compute cumulative ROI
+    cumulative_roi = compute_cumulative_roi(cursor, positions, cost_basis)
+
     history = {
         "positions": positions,
         "stg": short_term_gains,
@@ -575,6 +616,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
         "distributions": distributions,
         "cost_basis": cost_basis,
         "value": value,
+        "cumulative_roi": cumulative_roi,
     }
 
     return history
@@ -622,35 +664,8 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         positions = history["positions"]
         cost_basis_data = history["cost_basis"]
-
-        symbols = positions.columns
-
-        # Create ROI dataframe
-        roi_df = pd.DataFrame(index=positions.index, columns=symbols)
-        roi_df[:] = 0.0
-
-        # Create value dataframe for market values
-        value_df = pd.DataFrame(index=positions.index, columns=symbols)
-        value_df[:] = 0.0
-
-        # Calculate ROI and values for each period
-        for date_idx in positions.index:
-            # Get closing prices for this date
-            closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
-
-            for symbol in symbols:
-                quantity = positions.loc[date_idx, symbol]
-                cost_basis_val = cost_basis_data.loc[date_idx, symbol]
-
-                # Current market value
-                current_value = quantity * closings[symbol]
-                value_df.loc[date_idx, symbol] = current_value
-
-                if quantity != 0 and cost_basis_val != 0:
-                    # ROI as percentage
-                    roi_df.loc[date_idx, symbol] = (current_value - cost_basis_val) / cost_basis_val * 100
-                else:
-                    roi_df.loc[date_idx, symbol] = 0.0
+        value_data = history["value"]
+        roi_df = history["cumulative_roi"]
 
         if args.ticker:
             # Create detailed view for single ticker
@@ -662,12 +677,21 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                 closings = lmidb.get_closing_values(cursor, [ticker], date_idx)
                 closing_prices[date_idx] = closings[ticker]
 
+            # Extract market value for the ticker from the value DataFrame
+            # Remove "Total" column if it exists
+            value_columns = [col for col in value_data.columns if col != "Total"]
+            if ticker in value_columns:
+                market_value = value_data[ticker]
+            else:
+                market_value = pd.Series(index=positions.index, dtype=float)
+                market_value[:] = 0.0
+
             detail_df = pd.DataFrame(
                 {
                     "Quantity": positions[ticker],
                     "Price": closing_prices,
                     "Cost Basis": cost_basis_data[ticker],
-                    "Market Value": value_df[ticker],
+                    "Market Value": market_value,
                     "ROI %": roi_df[ticker],
                 }
             )
@@ -793,6 +817,33 @@ def income(all_history: dict) -> None:
         print(history["income"])
 
 
+def full_report(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    """Print a comprehensive report including cumulative ROI, value, income, and summary."""
+    for account, history in all_history.items():
+        print(f"Full Report for: {account}")
+
+        positions = history["positions"]
+        value = history["value"]
+        cost_basis_data = history["cost_basis"]
+        roi_df = history["cumulative_roi"]
+        income_data = history["income"]
+
+        print(f"\nMost Recent Period Value:\n{value.iloc[-1].to_frame().T}")
+        print(f"Total Value: ${value.iloc[-1].sum():.2f}")
+        print(f"Total Cost Basis: ${cost_basis_data.iloc[-1].sum():.2f}")
+
+        total_gain = value.iloc[-1].sum() - cost_basis_data.iloc[-1].sum()
+        total_roi = (total_gain / cost_basis_data.iloc[-1].sum() * 100) if cost_basis_data.iloc[-1].sum() != 0 else 0.0
+        print(f"Total Gain/Loss: ${total_gain:.2f}")
+        print(f"Total ROI: {total_roi:.2f}%")
+
+        print(f"\nPositions\n{positions}")
+        print(f"\nCost Basis\n{cost_basis_data}")
+        print(f"\nMarket Value\n{value}")
+        print(f"\nIncome\n{income_data}")
+        print(f"\nROI (%)\n{roi_df}\n")
+
+
 def main(enable_profiling=False):
     if enable_profiling:
         profiler = cProfile.Profile()
@@ -849,6 +900,7 @@ def main(enable_profiling=False):
             "summary",
             "roi",
             "interval-roi",
+            "full",
         ],
         help="Action to take.",
     )
@@ -888,6 +940,8 @@ def main(enable_profiling=False):
             interval_roi(cursor, all_history)
         case "income":
             income(all_history)
+        case "full":
+            full_report(cursor, all_history)
         case _:
             print("inconcievable")
 
