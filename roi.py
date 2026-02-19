@@ -1,14 +1,112 @@
 #!/usr/bin/env python3
 
 import argparse
+import cProfile
 import datetime as dt
+import functools
+import io
 import pandas as pd
 from pathlib import Path
+import pstats
 import sqlite3
+import time
 
 import lmidb
 
 
+class ProfilingCursor:
+    """Wrapper around sqlite3.Cursor that tracks query execution times."""
+
+    def __init__(self, cursor: sqlite3.Cursor, enable_profiling: bool = False):
+        self._cursor = cursor
+        self._enable_profiling = enable_profiling
+        self.query_stats = {}  # {query_pattern: {"count": int, "total_time": float, "max_time": float}}
+
+    def __getattr__(self, name):
+        """Delegate all other attributes to the underlying cursor."""
+        return getattr(self._cursor, name)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def execute(self, sql, parameters=()):
+        if self._enable_profiling:
+            start_time = time.perf_counter()
+            result = self._cursor.execute(sql, parameters)
+            elapsed = time.perf_counter() - start_time
+
+            # Create a pattern key (normalize the SQL for grouping)
+            # Strip whitespace and limit length for readability
+            query_pattern = " ".join(sql.split())[:100]
+
+            if query_pattern not in self.query_stats:
+                self.query_stats[query_pattern] = {"count": 0, "total_time": 0.0, "max_time": 0.0}
+
+            self.query_stats[query_pattern]["count"] += 1
+            self.query_stats[query_pattern]["total_time"] += elapsed
+            self.query_stats[query_pattern]["max_time"] = max(self.query_stats[query_pattern]["max_time"], elapsed)
+
+            # Log slow queries immediately (> 0.1 seconds)
+            if elapsed > 0.1:
+                print(f"[SLOW QUERY] {elapsed:.4f}s: {query_pattern}")
+
+            return result
+        else:
+            return self._cursor.execute(sql, parameters)
+
+    def print_stats(self):
+        """Print query statistics sorted by total time."""
+        if not self.query_stats:
+            return
+
+        print("\n" + "=" * 100)
+        print("DATABASE QUERY PROFILING RESULTS")
+        print("=" * 100)
+
+        # Sort by total time descending
+        sorted_queries = sorted(self.query_stats.items(), key=lambda x: x[1]["total_time"], reverse=True)
+
+        total_time = sum(stats["total_time"] for _, stats in sorted_queries)
+        total_count = sum(stats["count"] for _, stats in sorted_queries)
+
+        print(f"\nTotal Queries: {total_count}")
+        print(f"Total Query Time: {total_time:.4f} seconds\n")
+        print(f"{'Count':<8} {'Total(s)':<10} {'Avg(s)':<10} {'Max(s)':<10} {'%':<6} Query")
+        print("-" * 100)
+
+        for query_pattern, stats in sorted_queries[:30]:  # Top 30 queries
+            count = stats["count"]
+            total = stats["total_time"]
+            avg = total / count
+            max_time = stats["max_time"]
+            pct = (total / total_time * 100) if total_time > 0 else 0
+
+            print(f"{count:<8} {total:<10.4f} {avg:<10.6f} {max_time:<10.6f} {pct:<6.1f} {query_pattern}")
+
+
+def timeit(func):
+    """Decorator to measure function execution time."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        import os
+
+        enable_timing = os.environ.get("PROFILE", "0") == "1"
+
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        elapsed = end_time - start_time
+
+        if enable_timing:
+            print(f"[TIMING] {func.__name__}: {elapsed:.4f} seconds")
+
+        return result
+
+    return wrapper
+
+
+@timeit
 def compute_cost_basis_forward(
     cursor: sqlite3.Cursor,
     account_id: int,
@@ -138,6 +236,7 @@ def compute_cost_basis_forward(
     return cost_basis
 
 
+@timeit
 def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.DataFrame) -> pd.DataFrame:
     """
     Compute the market value of each security in the positions DataFrame.
@@ -161,6 +260,7 @@ def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.Data
     return value
 
 
+@timeit
 def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dict:
     account_filters = args.account
     # Get all accounts from the database
@@ -188,6 +288,7 @@ def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dic
     return all_history
 
 
+@timeit
 def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     """Compute monthly positions, short term gains, long term gains, income, management fees, and distributions
     for the indicated account."""
@@ -516,6 +617,7 @@ def summary(all_history: dict) -> None:
         print(f"Total ROI: {total_roi:.2f}%")
 
 
+@timeit
 def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
     for account, history in all_history.items():
         positions = history["positions"]
@@ -576,6 +678,7 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
             print(roi_df)
 
 
+@timeit
 def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
     """Compute ROI for each interval period (since the previous period).
     This shows the performance gain/loss for each discrete time period.
@@ -690,7 +793,12 @@ def income(all_history: dict) -> None:
         print(history["income"])
 
 
-def main():
+def main(enable_profiling=False):
+    if enable_profiling:
+        profiler = cProfile.Profile()
+        profiler.enable()
+
+    start_time = time.perf_counter()
     parser = argparse.ArgumentParser(
         description="Investment Performance Calculator",
         epilog="Use Schwab investment account credentials if prompted for a login.",
@@ -760,7 +868,8 @@ def main():
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     global cursor
-    cursor = conn.cursor()
+    raw_cursor = conn.cursor()
+    cursor = ProfilingCursor(raw_cursor, enable_profiling=enable_profiling or args.debug)
 
     all_history = compute_all_history(cursor, args)
 
@@ -782,6 +891,32 @@ def main():
         case _:
             print("inconcievable")
 
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
+
+    # Print database query statistics
+    if isinstance(cursor, ProfilingCursor):
+        cursor.print_stats()
+
+    if enable_profiling:
+        print(f"\n[TOTAL EXECUTION TIME] {total_time:.4f} seconds")
+
+    if enable_profiling:
+        profiler.disable()
+        s = io.StringIO()
+        stats = pstats.Stats(profiler, stream=s)
+        stats.sort_stats(pstats.SortKey.CUMULATIVE)
+        stats.print_stats(30)  # Print top 30 functions
+        print("\n" + "=" * 80)
+        print("PROFILING RESULTS (Top 30 by cumulative time)")
+        print("=" * 80)
+        print(s.getvalue())
+
 
 if __name__ == "__main__":
-    main()
+    # Enable profiling by setting environment variable PROFILE=1
+    # or by uncommenting the line below
+    import os
+
+    enable_profiling = os.environ.get("PROFILE", "0") == "1"
+    main(enable_profiling=enable_profiling)

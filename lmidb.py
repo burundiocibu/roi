@@ -18,6 +18,41 @@ import schapi
 # with the value of "cash"
 cash = "cash"
 
+# Cache for candles data - structured for fast lookups
+# {symbol: {'dates': array, 'closes': array}}
+_candles_cache = None
+
+
+def load_candles_cache(cursor: sqlite3.Cursor):
+    """Load all candles data into memory as a structured dict for fast lookups."""
+    global _candles_cache
+    import numpy as np
+
+    # Query all candles data
+    query = "SELECT date, symbol, close FROM candles ORDER BY symbol, date"
+    df = pd.read_sql_query(query, cursor.connection)
+
+    # Convert date column to datetime
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Build a nested dict: {symbol: {'dates': array, 'closes': array}}
+    # Store dates as datetime64 (numeric) for fast binary search
+    _candles_cache = {}
+    for symbol in df["symbol"].unique():
+        symbol_data = df[df["symbol"] == symbol].sort_values("date")
+        _candles_cache[symbol] = {
+            "dates": symbol_data["date"].values,  # datetime64 array - fast!
+            "closes": symbol_data["close"].values,
+        }
+
+    return _candles_cache
+
+
+def clear_candles_cache():
+    """Clear the candles cache. Call this if database is updated."""
+    global _candles_cache
+    _candles_cache = None
+
 
 def create_initial_tables(cursor: sqlite3.Cursor) -> None:
     """
@@ -505,6 +540,8 @@ def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date
     If no data exists for a ticker on that exact date, returns the most recent closing
     value before that date. If no data exists at all, NaN is returned for that ticker.
 
+    Uses a module-level dict cache with binary search for O(log n) lookups.
+
     :param cursor: cursor for database connection
     :type cursor: sqlite3.Cursor
     :param tickers: list of ticker symbols
@@ -514,9 +551,20 @@ def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date
     :return: pandas Series with ticker symbols as index and closing values as values
     :rtype: pd.Series
     """
-    # Convert date to just the date part if it's a datetime
-    if isinstance(date, dt.datetime):
-        date = date.date()
+    import numpy as np
+
+    global _candles_cache
+
+    # Load cache on first access
+    if _candles_cache is None:
+        load_candles_cache(cursor)
+
+    # Convert date to numpy datetime64 for comparison with datetime64 array
+    if isinstance(date, dt.date) and not isinstance(date, dt.datetime):
+        # Convert date to datetime64
+        date = np.datetime64(date)
+    elif isinstance(date, dt.datetime):
+        date = np.datetime64(date)
 
     result = {}
 
@@ -526,21 +574,21 @@ def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date
             result[ticker] = 1.0
             continue
 
-        # Query for the closing value on or before the specified date
-        # Get the most recent closing price that is on or before the target date
-        cursor.execute(
-            """
-            SELECT close FROM candles
-            WHERE symbol = ? AND date(date) <= date(?)
-            ORDER BY date DESC
-            LIMIT 1
-            """,
-            (ticker, date.isoformat()),
-        )
-        row = cursor.fetchone()
+        # Look up ticker in cache
+        if ticker not in _candles_cache:
+            result[ticker] = None
+            continue
 
-        if row:
-            result[ticker] = float(row[0])
+        ticker_data = _candles_cache[ticker]
+        dates = ticker_data["dates"]  # datetime64 array
+        closes = ticker_data["closes"]
+
+        # Binary search for the most recent date <= target date
+        # Since dates are datetime64 (numeric), this is very fast
+        idx = np.searchsorted(dates, date, side="right") - 1
+
+        if idx >= 0:
+            result[ticker] = float(closes[idx])
         else:
             result[ticker] = None
 
