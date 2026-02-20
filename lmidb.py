@@ -614,7 +614,10 @@ def get_securities_in_account(cursor: sqlite3.Cursor, account_id: int) -> list[s
     table_name = f"transactions_{account_id}"
     try:
         cursor.execute(f"SELECT DISTINCT symbol FROM {table_name} WHERE symbol IS NOT NULL AND symbol != ''")
-        securities = sorted(row[0] for row in cursor.fetchall())
+        securities = sorted(
+            (row[0] for row in cursor.fetchall()),
+            key=lambda s: (1 if len(s) == 9 else 0, s),
+        )
         securities.append(cash)
         return securities
     except sqlite3.OperationalError:

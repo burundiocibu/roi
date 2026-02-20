@@ -263,7 +263,7 @@ def compute_cumulative_roi(
     Returns a DataFrame with ROI percentages showing the total return since
     the initial investment for each security.
     """
-    symbols = positions.columns
+    symbols = [s for s in positions.columns if s != lmidb.cash]
 
     # Create ROI dataframe
     roi_df = pd.DataFrame(index=positions.index, columns=symbols)
@@ -528,6 +528,9 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                     print(f"{symbol}:{positions.loc[month, symbol]:.2f}, {cash}:{positions.loc[month, cash]:.2f}")
                 else:
                     print(f"{cash}:{positions.loc[month, cash]:.2f}")
+    # Snap floating-point noise to zero (backward computation can leave tiny residuals)
+    positions = positions.map(lambda x: 0.0 if abs(x) < 1e-9 else x)
+
     # Compute market value for each position first
     value = compute_value(cursor, symbols, positions)
 
@@ -691,7 +694,7 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                     "ROI %": roi_df[ticker],
                 }
             )
-            print(f"Account: {account} - Ticker: {ticker}")
+            print(f"Account: {account} - Ticker: {ticker} cumulitive ROI (%)")
             print(detail_df)
         else:
             print(f"Account: {account} cumulitive ROI (%)")
@@ -717,7 +720,7 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
         fees = history["fees"]
         distributions = history["distributions"]
 
-        symbols = positions.columns
+        symbols = [s for s in positions.columns if s != lmidb.cash]
 
         # Create value dataframe for market values
         value_df = pd.DataFrame(index=positions.index, columns=symbols)
@@ -809,6 +812,7 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
         else:
             print(f"Account: {account} Interval ROI (%)")
             print(interval_roi_df)
+        print("")
 
 
 def annual_roi(all_history: dict) -> None:
