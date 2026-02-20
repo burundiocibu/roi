@@ -107,190 +107,6 @@ def timeit(func):
 
 
 @timeit
-def compute_cost_basis_forward(
-    cursor: sqlite3.Cursor,
-    account_id: int,
-    symbols: list[str],
-    positions: pd.DataFrame,
-    value: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Compute cost basis by going forward in time from the first transaction.
-    Uses the positions DataFrame to get quantities at each point in time.
-    For sells, we reduce cost basis proportionally based on shares sold.
-    Uses the pre-computed value DataFrame to avoid redundant database lookups.
-    """
-    dtie = positions.index
-    cost_basis = pd.DataFrame(index=dtie, columns=symbols)
-    cost_basis[:] = 0.0
-
-    # Get all transactions in chronological order (forward in time)
-    # Filter to only the specified ticker if provided
-    if args.ticker:
-        cursor.execute(f"SELECT * FROM transactions_{account_id} WHERE Symbol = ? OR Symbol = '' ORDER BY Date ASC", (args.ticker,))
-    else:
-        cursor.execute(f"SELECT * FROM transactions_{account_id} ORDER BY Date ASC")
-    transactions = cursor.fetchall()
-
-    # Track running cost basis for each security
-    # Quantities come from the positions DataFrame
-    running_cost_basis = {symbol: 0.0 for symbol in symbols}
-
-    # Initialize cost basis for securities held at the start of the period
-    # For these, we use the market value at the first month-end as initial cost basis
-    first_month_end = dtie[0]
-    for symbol in symbols:
-        qty_at_start = positions.loc[first_month_end, symbol]
-        if qty_at_start > 0:  # type: ignore
-            # This security was held before transaction data starts
-            # Use market value at start as initial cost basis (from pre-computed value)
-            initial_value = value.loc[first_month_end, symbol]
-            running_cost_basis[symbol] = initial_value
-            if args.ticker and symbol == args.ticker and args.debug:
-                price = initial_value / qty_at_start if qty_at_start > 0 else 0
-                print(f"Initializing cost basis for {symbol}: {qty_at_start:.2f} shares @ ${price:.2f} = ${initial_value:.2f}")
-
-    transaction_idx = 0
-
-    for month_end in dtie:
-        # Process all transactions up to and including this month end
-        while transaction_idx < len(transactions):
-            t = transactions[transaction_idx]
-            tdate = dt.datetime.fromisoformat(t["date"][:10]).date()
-
-            if tdate > month_end:
-                break
-
-            action = t["Action"]
-            symbol = t["Symbol"]
-            quantity = float(t["Quantity"])
-            price = float(t["price"])
-
-            # This is to handle the
-            if len(symbol) == 9:
-                price = 1
-
-            if symbol in symbols:
-                old_cb = running_cost_basis[symbol]
-
-                # Get quantity from positions DataFrame (computed backwards in compute_history)
-                # Look up the position at the current month_end
-                qty_at_month_end = positions.loc[month_end, symbol]
-
-                # fmt: off
-                match action:
-                    case "Buy":
-                        running_cost_basis[symbol] += quantity * price
-                    case "Journaled Shares":
-                        if price == 0:
-                            candle_price = lmidb.get_closing_values(cursor, [symbol], tdate)[symbol]
-                            running_cost_basis[symbol] += quantity * candle_price
-                        else:
-                            running_cost_basis[symbol] += quantity * price
-                    case "Reinvest Shares":
-                        running_cost_basis[symbol] += quantity * price
-                    case "Reinvestment Adj":
-                        running_cost_basis[symbol] += quantity * price
-                    case "Security Transfer":
-                        if price == 0:
-                            candle_price = lmidb.get_closing_values(cursor, [symbol], tdate)[symbol]
-                            running_cost_basis[symbol] += quantity * candle_price
-                        else:
-                            running_cost_basis[symbol] += quantity * price
-                    case "Sell":
-                        # For sells, we need the quantity BEFORE the sell
-                        # Since positions are at month-end, we need qty + sell_quantity
-                        qty_before_sell = qty_at_month_end + quantity
-                        if qty_before_sell > 0 and running_cost_basis[symbol] > 0:
-                            avg_cost_per_share = running_cost_basis[symbol] / qty_before_sell
-                            running_cost_basis[symbol] -= quantity * avg_cost_per_share
-                        elif args.debug:
-                            print(f"Warning: Sell with no shares held for {symbol} on {tdate}")
-                    case "Stock Split":
-                        # Stock splits don't change cost basis
-                        pass
-                # fmt: on
-
-                # Debug output for ticker if specified
-                if args.ticker and symbol == args.ticker and running_cost_basis[symbol] != old_cb:
-                    if args.debug:
-                        avg_cost = running_cost_basis[symbol] / qty_at_month_end if qty_at_month_end > 0 else 0
-                        print(
-                            f"{tdate}: {action:25} Q:{quantity:8.2f} P:{price:8.2f} Qty@MonthEnd: {qty_at_month_end:7.2f} CB: {old_cb:10.2f} -> {running_cost_basis[symbol]:10.2f} (Avg: ${avg_cost:.2f})"
-                        )
-
-            transaction_idx += 1
-
-        # Record the cost basis at this month end
-        for symbol in symbols:
-            cost_basis.loc[month_end, symbol] = running_cost_basis[symbol]
-
-    return cost_basis
-
-
-@timeit
-def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute the market value of each security in the positions DataFrame.
-    Returns a DataFrame with the same structure as positions but containing
-    market values (quantity * price) instead of quantities.
-    """
-    dtie = positions.index
-    value = pd.DataFrame(index=dtie, columns=symbols)
-    value[:] = 0.0
-
-    # Calculate market value for each date
-    for date_idx in dtie:
-        # Get closing prices for this date
-        closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
-
-        for symbol in symbols:
-            quantity = positions.loc[date_idx, symbol]
-            # Market value = quantity * closing price
-            value.loc[date_idx, symbol] = quantity * closings[symbol]
-
-    return value
-
-
-@timeit
-def compute_cumulative_roi(
-    cursor: sqlite3.Cursor,
-    positions: pd.DataFrame,
-    cost_basis_data: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Compute cumulative ROI for each security at each point in time.
-    Returns a DataFrame with ROI percentages showing the total return since
-    the initial investment for each security.
-    """
-    symbols = [s for s in positions.columns if s != lmidb.cash]
-
-    # Create ROI dataframe
-    roi_df = pd.DataFrame(index=positions.index, columns=symbols)
-    roi_df[:] = 0.0
-
-    # Calculate ROI for each period
-    for date_idx in positions.index:
-        # Get closing prices for this date
-        closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
-
-        for symbol in symbols:
-            quantity = positions.loc[date_idx, symbol]
-            cost_basis_val = cost_basis_data.loc[date_idx, symbol]
-
-            # Current market value
-            current_value = quantity * closings[symbol]
-
-            if quantity != 0 and cost_basis_val != 0:
-                # ROI as percentage
-                roi_df.loc[date_idx, symbol] = (current_value - cost_basis_val) / cost_basis_val * 100
-            else:
-                roi_df.loc[date_idx, symbol] = 0.0
-
-    return roi_df
-
-
-@timeit
 def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dict:
     account_filters = args.account
     # Get all accounts from the database
@@ -366,6 +182,13 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
         symbols = [args.ticker, lmidb.cash]  # Always include cash
     else:
         symbols = lmidb.get_securities_in_account(cursor, account_id)
+        # Also include any symbols present in the latest positions snapshot
+        # that don't yet have transactions (e.g. newly transferred-in holdings)
+        position_symbols = set(latest_position_df["symbol"]) if len(latest_position_df) > 0 else set()
+        new_symbols = sorted(position_symbols - set(symbols))
+        if new_symbols:
+            cash_idx = symbols.index(lmidb.cash)
+            symbols = symbols[:cash_idx] + new_symbols + symbols[cash_idx:]
     positions = pd.DataFrame(index=dtie, columns=symbols)
 
     # initialize the end of positions datafrom with the latest position data
@@ -482,6 +305,8 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
                 case "MoneyLink Transfer":
                     positions.loc[month, cash] -= amount
                     distributions[month] -= amount
+                case "Pr Yr Cash Div":
+                    positions.loc[month, cash] -= amount
                 case "Reinvest Dividend":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
@@ -536,7 +361,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
 
     # Compute cost basis forward in time (needs positions for quantity tracking)
     # Pass value DataFrame to avoid redundant database lookups
-    cost_basis = compute_cost_basis_forward(cursor, account_id, symbols, positions, value)
+    cost_basis = compute_cost_basis(cursor, account_id, symbols, positions, value)
 
     # resample the history on the indicated interval
     if args.interval != "ME":
@@ -614,6 +439,196 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     }
 
     return history
+
+
+@timeit
+def compute_cost_basis(
+    cursor: sqlite3.Cursor,
+    account_id: int,
+    symbols: list[str],
+    positions: pd.DataFrame,
+    value: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute cost basis by going forward in time from the first transaction.
+    Uses the positions DataFrame to get quantities at each point in time.
+    For sells, we reduce cost basis proportionally based on shares sold.
+    Uses the pre-computed value DataFrame to avoid redundant database lookups.
+    """
+    if args.debug:
+        print("Computing cost basis for account {account_id}")
+    dtie = positions.index
+    cost_basis = pd.DataFrame(index=dtie, columns=symbols)
+    cost_basis[:] = 0.0
+
+    # Get all transactions in chronological order (forward in time)
+    # Filter to only the specified ticker if provided
+    if args.ticker:
+        cursor.execute(f"SELECT * FROM transactions_{account_id} WHERE Symbol = ? OR Symbol = '' ORDER BY Date ASC", (args.ticker,))
+    else:
+        cursor.execute(f"SELECT * FROM transactions_{account_id} ORDER BY Date ASC")
+    transactions = cursor.fetchall()
+
+    # Track running cost basis for each security
+    # Quantities come from the positions DataFrame
+    running_cost_basis = {symbol: 0.0 for symbol in symbols}
+
+    # Initialize cost basis for securities held at the start of the period
+    # For these, we use the market value at the first month-end as initial cost basis
+    first_month_end = dtie[0]
+    for symbol in symbols:
+        qty_at_start = positions.loc[first_month_end, symbol]
+        if qty_at_start > 0:  # type: ignore
+            # This security was held before transaction data starts
+            # Use market value at start as initial cost basis (from pre-computed value)
+            initial_value = value.loc[first_month_end, symbol]
+            running_cost_basis[symbol] = initial_value
+            if args.ticker and symbol == args.ticker and args.debug:
+                price = initial_value / qty_at_start if qty_at_start > 0 else 0
+                print(f"Initializing cost basis for {symbol}: {qty_at_start:.2f} shares @ ${price:.2f} = ${initial_value:.2f}")
+
+    transaction_idx = 0
+
+    for month_end in dtie:
+        # Process all transactions up to and including this month end
+        while transaction_idx < len(transactions):
+            t = transactions[transaction_idx]
+            tdate = dt.datetime.fromisoformat(t["date"][:10]).date()
+
+            if tdate > month_end:
+                break
+
+            action = t["Action"]
+            symbol = t["Symbol"]
+            quantity = float(t["Quantity"])
+            price = float(t["price"])
+
+            # This is to handle the
+            if len(symbol) == 9:
+                price = 1
+
+            if symbol in symbols:
+                old_cb = running_cost_basis[symbol]
+
+                # Get quantity from positions DataFrame (computed backwards in compute_history)
+                # Look up the position at the current month_end
+                qty_at_month_end = positions.loc[month_end, symbol]
+
+                # fmt: off
+                match action:
+                    case "Buy":
+                        running_cost_basis[symbol] += quantity * price
+                    case "Journaled Shares":
+                        if price == 0:
+                            candle_price = lmidb.get_closing_values(cursor, [symbol], tdate)[symbol]
+                            running_cost_basis[symbol] += quantity * candle_price
+                        else:
+                            running_cost_basis[symbol] += quantity * price
+                    case "Reinvest Shares":
+                        running_cost_basis[symbol] += quantity * price
+                    case "Reinvestment Adj":
+                        running_cost_basis[symbol] += quantity * price
+                    case "Security Transfer":
+                        if price == 0:
+                            candle_price = lmidb.get_closing_values(cursor, [symbol], tdate)[symbol]
+                            running_cost_basis[symbol] += quantity * candle_price
+                        else:
+                            running_cost_basis[symbol] += quantity * price
+                    case "Sell":
+                        # For sells, we need the quantity BEFORE the sell
+                        # Since positions are at month-end, we need qty + sell_quantity
+                        qty_before_sell = qty_at_month_end + quantity
+                        if qty_before_sell > 0 and running_cost_basis[symbol] > 0:
+                            avg_cost_per_share = running_cost_basis[symbol] / qty_before_sell
+                            running_cost_basis[symbol] -= quantity * avg_cost_per_share
+                        elif args.debug:
+                            print(f"Warning: Sell with no shares held for {symbol} on {tdate}")
+                    case "Stock Split":
+                        # Stock splits don't change cost basis
+                        pass
+                # fmt: on
+
+                # Debug output for ticker if specified
+                if args.ticker and symbol == args.ticker and running_cost_basis[symbol] != old_cb:
+                    if args.debug:
+                        avg_cost = running_cost_basis[symbol] / qty_at_month_end if qty_at_month_end > 0 else 0
+                        print(
+                            f"{tdate}: {action:25} Q:{quantity:8.2f} P:{price:8.2f} Qty@MonthEnd: {qty_at_month_end:7.2f} CB: {old_cb:10.2f} -> {running_cost_basis[symbol]:10.2f} (Avg: ${avg_cost:.2f})"
+                        )
+
+            transaction_idx += 1
+
+        # Record the cost basis at this month end
+        for symbol in symbols:
+            cost_basis.loc[month_end, symbol] = running_cost_basis[symbol]
+
+    return cost_basis
+
+
+@timeit
+def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute the market value of each security in the positions DataFrame.
+    Returns a DataFrame with the same structure as positions but containing
+    market values (quantity * price) instead of quantities.
+    """
+    if args.debug:
+        print("Computing value for account {account_id}")
+    dtie = positions.index
+    value = pd.DataFrame(index=dtie, columns=symbols)
+    value[:] = 0.0
+
+    # Calculate market value for each date
+    for date_idx in dtie:
+        # Get closing prices for this date
+        closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
+
+        for symbol in symbols:
+            quantity = positions.loc[date_idx, symbol]
+            # Market value = quantity * closing price
+            value.loc[date_idx, symbol] = quantity * closings[symbol]
+
+    return value
+
+
+@timeit
+def compute_cumulative_roi(
+    cursor: sqlite3.Cursor,
+    positions: pd.DataFrame,
+    cost_basis_data: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute cumulative ROI for each security at each point in time.
+    Returns a DataFrame with ROI percentages showing the total return since
+    the initial investment for each security.
+    """
+    if args.debug:
+        print("Computing cumulitive ROI for account {account_id}")
+    symbols = [s for s in positions.columns if s != lmidb.cash]
+
+    # Create ROI dataframe
+    roi_df = pd.DataFrame(index=positions.index, columns=symbols)
+    roi_df[:] = 0.0
+
+    # Calculate ROI for each period
+    for date_idx in positions.index:
+        # Get closing prices for this date
+        closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
+
+        for symbol in symbols:
+            quantity = positions.loc[date_idx, symbol]
+            cost_basis_val = cost_basis_data.loc[date_idx, symbol]
+
+            # Current market value
+            current_value = quantity * closings[symbol]
+
+            if quantity != 0 and cost_basis_val != 0:
+                # ROI as percentage
+                roi_df.loc[date_idx, symbol] = (current_value - cost_basis_val) / cost_basis_val * 100
+            else:
+                roi_df.loc[date_idx, symbol] = 0.0
+
+    return roi_df
 
 
 def cost_basis(all_history: dict) -> None:

@@ -268,6 +268,13 @@ def update_schwab_transactions(fn: Path, account_id: int, cursor: sqlite3.Cursor
                 continue  # Skip, already in DB
             action = row["Action"]
             symbol = row["Symbol"]
+            # Schwab transaction CSVs strip slashes (e.g. MOG/A -> MOGA).
+            # Look for a canonical ticker that matches when slashes are removed.
+            if symbol:
+                cursor.execute("SELECT symbol FROM tickers WHERE REPLACE(symbol, '/', '') = ?", (symbol,))
+                row_match = cursor.fetchone()
+                if row_match:
+                    symbol = row_match[0]
             description = row["Description"]
             quantity = fns_to_float(row["Quantity"])
             price = fns_to_float(row["Price"])
