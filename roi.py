@@ -628,6 +628,11 @@ def show_value(all_history: dict) -> None:
         print(f"Market value for {account}:\n{history["value"]}")
 
 
+def income(all_history: dict) -> None:
+    for account, history in all_history.items():
+        print(f"Income for {account}:\n{history["income"]}")
+
+
 def summary(all_history: dict) -> None:
     for account, history in all_history.items():
         positions = history["positions"]
@@ -694,6 +699,7 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                 print(roi_df)
             else:
                 print(roi_df.iloc[[-1]])
+        print("")
 
 
 @timeit
@@ -805,10 +811,43 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
             print(interval_roi_df)
 
 
-def income(all_history: dict) -> None:
+def annual_roi(all_history: dict) -> None:
     for account, history in all_history.items():
-        print(f"{account} income:")
-        print(history["income"])
+        positions = history["positions"]
+        cost_basis_data = history["cost_basis"]
+        cumulative_roi = history["cumulative_roi"]
+
+        result = pd.DataFrame(index=positions.index, columns=cumulative_roi.columns, dtype=float)
+        result[:] = 0.0
+
+        for symbol in cumulative_roi.columns:
+            if symbol == "Total":
+                cb_series = cost_basis_data["Total"]
+            else:
+                if symbol not in cost_basis_data.columns:
+                    continue
+                cb_series = cost_basis_data[symbol]
+
+            held = cb_series[cb_series > 0]
+            if len(held) == 0:
+                continue
+            first_date = held.index[0]
+
+            for date_idx in positions.index:
+                days_held = (date_idx - first_date).days
+                if days_held <= 0:
+                    continue
+                roi_pct = cumulative_roi.loc[date_idx, symbol]
+                roi_factor = 1 + roi_pct / 100
+                if roi_factor > 0:
+                    result.loc[date_idx, symbol] = (roi_factor ** (365.25 / days_held) - 1) * 100
+
+        print(f"Account: {account} annualized ROI (%)")
+        if args.verbosity > 0:
+            print(result)
+        else:
+            print(result.iloc[[-1]])
+        print("")
 
 
 def full_report(all_history: dict) -> None:
@@ -914,6 +953,7 @@ def main(enable_profiling=False):
             "summary",
             "roi",
             "interval-roi",
+            "annual-roi",
             "full",
         ],
         help="Action to take.",
@@ -953,6 +993,8 @@ def main(enable_profiling=False):
             cumulitive_roi(cursor, all_history)
         case "interval-roi":
             interval_roi(cursor, all_history)
+        case "annual-roi":
+            annual_roi(all_history)
         case "income":
             income(all_history)
         case "full":
