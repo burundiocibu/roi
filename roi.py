@@ -869,6 +869,13 @@ def annual_roi(all_history: dict) -> None:
         print("")
 
 
+def fees(all_history: dict) -> None:
+    """Print a report of fees."""
+    for account, history in all_history.items():
+        print(f"Fees for: {account}")
+        print(f"{history["fees"]}\n")
+
+
 def full_report(all_history: dict) -> None:
     """Print a comprehensive report including cumulative ROI, value, income, and summary."""
     for account, history in all_history.items():
@@ -974,6 +981,7 @@ def main(enable_profiling=False):
             "interval-roi",
             "annual-roi",
             "full",
+            "fees",
         ],
         help="Action to take.",
     )
@@ -1000,24 +1008,26 @@ def main(enable_profiling=False):
     all_history = compute_all_history(cursor, args)
 
     match args.action:
-        case "cost-basis":
-            cost_basis(all_history)
-        case "summary":
-            summary(all_history)
-        case "positions":
-            show_positions(all_history)
-        case "value":
-            show_value(all_history)
-        case "roi":
-            cumulitive_roi(cursor, all_history)
-        case "interval-roi":
-            interval_roi(cursor, all_history)
         case "annual-roi":
             annual_roi(all_history)
-        case "income":
-            income(all_history)
+        case "cost-basis":
+            cost_basis(all_history)
+        case "fees":
+            fees(all_history)
         case "full":
             full_report(all_history)
+        case "income":
+            income(all_history)
+        case "interval-roi":
+            interval_roi(cursor, all_history)
+        case "positions":
+            show_positions(all_history)
+        case "roi":
+            cumulitive_roi(cursor, all_history)
+        case "summary":
+            summary(all_history)
+        case "value":
+            show_value(all_history)
         case _:
             print("inconcievable")
 

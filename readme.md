@@ -59,3 +59,10 @@ Note that the account hash is tied to the bearer token...
 61776WBL6
 40055QCU4
 40054LRA4
+
+
+the instruments api for schwab has the following asset types:
+[ BOND, EQUITY, ETF, EXTENDED, FOREX, FUTURE, FUTURE_OPTION, FUNDAMENTAL, INDEX, INDICATOR, MUTUAL_FUND, OPTION, UNKNOWN ]
+EQUITY: a plain stock
+ETF: yeah, an etf
+MUTUAL_FUND

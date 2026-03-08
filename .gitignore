@@ -4,3 +4,4 @@ __pycache__/
 schwab-data
 token.json
 *.db
+.DS_Store
