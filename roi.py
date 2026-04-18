@@ -4,6 +4,7 @@ import argparse
 import cProfile
 import datetime as dt
 import functools
+import inspect
 import io
 import pandas as pd
 from pathlib import Path
@@ -18,6 +19,12 @@ class ProfilingCursor:
     """Wrapper around sqlite3.Cursor that tracks query execution times."""
 
     def __init__(self, cursor: sqlite3.Cursor, enable_profiling: bool = False):
+        """Wrap a sqlite3 cursor to optionally record per-query timing statistics.
+
+        Args:
+            cursor: The underlying sqlite3 cursor to delegate to.
+            enable_profiling: When True, records timing for every execute() call.
+        """
         self._cursor = cursor
         self._enable_profiling = enable_profiling
         self.query_stats = {}  # {query_pattern: {"count": int, "total_time": float, "max_time": float}}
@@ -27,9 +34,18 @@ class ProfilingCursor:
         return getattr(self._cursor, name)
 
     def __iter__(self):
+        """Delegate iteration to the underlying cursor."""
         return iter(self._cursor)
 
     def execute(self, sql, parameters=()):
+        """Execute a SQL statement, recording elapsed time when profiling is enabled.
+
+        Args:
+            sql: SQL statement to execute.
+            parameters: Bind parameters for the statement (default: empty tuple).
+        Returns:
+            The result of the underlying cursor.execute() call.
+        """
         if self._enable_profiling:
             start_time = time.perf_counter()
             result = self._cursor.execute(sql, parameters)
@@ -108,6 +124,14 @@ def timeit(func):
 
 @timeit
 def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dict:
+    """Load history for every account matching the account filter, returning a combined dict.
+
+    Args:
+        cursor: Database cursor used for all queries.
+        args: Parsed CLI arguments (uses args.account, args.debug, and others passed through).
+    Returns:
+        Dict keyed by account name, each value being the history dict from compute_history().
+    """
     account_filters = args.account
     # Get all accounts from the database
     if account_filters:
@@ -145,8 +169,16 @@ def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dic
 
 @timeit
 def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set[str]) -> dict:
-    """Compute monthly positions, short term gains, long term gains, income, management fees, and distributions
-    for the indicated account."""
+    """Compute full financial history for one account by walking transactions backward to derive positions, then forward for cost basis.
+
+    Args:
+        cursor: Database cursor used for all queries.
+        account_id: Primary key of the account in the accounts table.
+        equity_tickers: Set of ticker symbols classified as EQUITY (used for Equities aggregation).
+    Returns:
+        Dict with keys: positions, stg, ltg, income, fees, distributions, cost_basis, value, cumulative_roi —
+        each a DataFrame indexed by period-end date.
+    """
 
     cursor.execute(f"SELECT MIN(Date) as first_date, MAX(Date) as last_date FROM transactions_{account_id}")
     result = cursor.fetchone()
@@ -470,11 +502,16 @@ def compute_cost_basis(
     positions: pd.DataFrame,
     value: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Compute cost basis by going forward in time from the first transaction.
-    Uses the positions DataFrame to get quantities at each point in time.
-    For sells, we reduce cost basis proportionally based on shares sold.
-    Uses the pre-computed value DataFrame to avoid redundant database lookups.
+    """Compute cost basis forward in time using average-cost accounting; sells reduce basis proportionally.
+
+    Args:
+        cursor: Database cursor used for transaction and candle queries.
+        account_id: Primary key of the account in the accounts table.
+        symbols: Ordered list of ticker symbols (including cash) to track.
+        positions: DataFrame of share quantities indexed by period-end date (from compute_history).
+        value: Pre-computed market value DataFrame used to seed cost basis for pre-existing holdings.
+    Returns:
+        DataFrame of cost basis values with the same index and columns as positions.
     """
     if args.debug:
         print(f"Computing cost basis for account {account_id}")
@@ -588,10 +625,14 @@ def compute_cost_basis(
 
 @timeit
 def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute the market value of each security in the positions DataFrame.
-    Returns a DataFrame with the same structure as positions but containing
-    market values (quantity * price) instead of quantities.
+    """Compute market value (quantity × closing price) for each security at each period-end date.
+
+    Args:
+        cursor: Database cursor used for candle price lookups.
+        symbols: Ordered list of ticker symbols to value.
+        positions: DataFrame of share quantities indexed by period-end date.
+    Returns:
+        DataFrame with the same index and columns as positions, containing dollar market values.
     """
     dtie = positions.index
     value = pd.DataFrame(index=dtie, columns=symbols)
@@ -615,9 +656,13 @@ def compute_cumulative_roi(
     value_df: pd.DataFrame,
     cost_basis_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Compute cumulative ROI for each security at each point in time.
-    Uses pre-computed value and cost_basis DataFrames directly.
+    """Compute cumulative ROI (%) as (value - cost_basis) / cost_basis × 100 for each security and period.
+
+    Args:
+        value_df: Market value DataFrame indexed by period-end date (excludes cash and Total columns).
+        cost_basis_df: Cost basis DataFrame with matching index and columns.
+    Returns:
+        DataFrame of ROI percentages with the same index; zero where cost basis is zero or None.
     """
     if args.debug:
         print(f"compute_cumulative_roi")
@@ -633,26 +678,51 @@ def compute_cumulative_roi(
 
 
 def cost_basis(all_history: dict) -> None:
+    """Print the cost basis DataFrame for each account.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         print(f"Cost basis for {account}:\n{history['cost_basis']}")
 
 
 def show_positions(all_history: dict) -> None:
+    """Print the share quantity positions DataFrame for each account.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         print(f"Positions for {account}:\n{history['positions']}")
 
 
 def show_value(all_history: dict) -> None:
+    """Print the market value DataFrame for each account.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         print(f"Market value for {account}:\n{history['value']}")
 
 
 def income(all_history: dict) -> None:
+    """Print the income (dividends, interest, capital gains distributions) DataFrame for each account.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         print(f"Income for {account}:\n{history['income']}")
 
 
 def summary(all_history: dict) -> None:
+    """Print first and last period values, total cost basis, gain/loss, and overall ROI for each account.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         positions = history["positions"]
         value = history["value"]
@@ -676,6 +746,12 @@ def summary(all_history: dict) -> None:
 
 @timeit
 def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
+    """Print cumulative ROI (%) for each security; with --ticker shows a per-period detail table including price and cost basis.
+
+    Args:
+        cursor: Database cursor used for closing price lookups when a single ticker is requested.
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         positions = history["positions"]
         cost_basis_data = history["cost_basis"]
@@ -822,6 +898,11 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
 
 
 def annual_roi(all_history: dict) -> None:
+    """Print annualized (CAGR) ROI (%) for each security, calculated from first date held to each period-end.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         positions = history["positions"]
         cost_basis_data = history["cost_basis"]
@@ -861,14 +942,22 @@ def annual_roi(all_history: dict) -> None:
 
 
 def fees(all_history: dict) -> None:
-    """Print a report of fees."""
+    """Print advisor/management fees Series for each account.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         print(f"Fees for: {account}")
         print(f"{history["fees"]}\n")
 
 
 def full_report(all_history: dict) -> None:
-    """Print a comprehensive report including cumulative ROI, value, income, and summary."""
+    """Print positions, cost basis, market value, income, and ROI for each account; most-recent row only unless -v.
+
+    Args:
+        all_history: Dict keyed by account name containing history dicts from compute_history().
+    """
     for account, history in all_history.items():
         print(f"Full Report for: {account}")
 
@@ -914,14 +1003,36 @@ def full_report(all_history: dict) -> None:
 
 
 def main(enable_profiling=False):
+    """Parse CLI arguments, open the database, compute history for all matching accounts, and dispatch to the requested report.
+
+    Args:
+        enable_profiling: When True, wraps execution in cProfile and prints timing stats on exit.
+    """
     if enable_profiling:
         profiler = cProfile.Profile()
         profiler.enable()
 
     start_time = time.perf_counter()
+    action_funcs = {
+        "annual-roi": annual_roi,
+        "cost-basis": cost_basis,
+        "fees": fees,
+        "full": full_report,
+        "income": income,
+        "interval-roi": interval_roi,
+        "positions": show_positions,
+        "roi": cumulitive_roi,
+        "summary": summary,
+        "value": show_value,
+    }
+    action_help = "\n".join(
+        f"  {name:14} {inspect.getdoc(fn).splitlines()[0]}"
+        for name, fn in action_funcs.items()
+    )
     parser = argparse.ArgumentParser(
         description="Investment Performance Calculator",
-        epilog="Use Schwab investment account credentials if prompted for a login.",
+        epilog=f"actions:\n{action_help}\n\nUse Schwab investment account credentials if prompted for a login.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--database",
@@ -962,19 +1073,8 @@ def main(enable_profiling=False):
     parser.add_argument(
         "action",
         type=str,
-        choices=[
-            "cost-basis",
-            "positions",
-            "value",
-            "income",
-            "summary",
-            "roi",
-            "interval-roi",
-            "annual-roi",
-            "full",
-            "fees",
-        ],
-        help="Action to take.",
+        choices=list(action_funcs.keys()),
+        help="Action to take (see below for descriptions).",
     )
     parser.add_argument("-v", "--verbosity", action="count", default=0, help="Increase output verbosity.")
     parser.add_argument(
