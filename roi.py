@@ -786,6 +786,7 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                     "ROI %": roi_df[ticker],
                 }
             )
+            detail_df = detail_df[detail_df["Quantity"] != 0]
             print(f"Account: {account} - Ticker: {ticker} cumulitive ROI (%)")
             print(detail_df)
         else:
@@ -889,6 +890,7 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                     "ROI %": interval_roi_df[ticker],
                 }
             )
+            detail_df = detail_df[detail_df["Quantity"] != 0]
             print(f"Account: {account} - Ticker: {ticker} - interval ROI")
             print(detail_df)
         else:
@@ -984,6 +986,7 @@ def full_report(all_history: dict) -> None:
                 combined["Total Cost Basis"] = cost_basis_data["Total"]
                 combined["Total ROI %"] = roi_df["Total"]
 
+            combined = combined[combined["Quantity"] != 0]
             print(f"\nCombined History for {ticker}:")
             print(combined)
         else:
