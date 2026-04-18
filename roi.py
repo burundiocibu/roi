@@ -870,17 +870,15 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                     # - Reinvested income (already in CB)
                     # - Distributions (already in CB)
 
-                    if start_value != 0:
+                    if start_value > 0 and cost_basis_change <= start_value:
                         interval_roi_df.loc[curr_date, symbol] = (end_value - start_value - cost_basis_change) / start_value * 100
+                    elif end_cost_basis != 0:
+                        # Large capital injection or zero start: compare end value to end cost basis
+                        interval_roi_df.loc[curr_date, symbol] = (end_value - end_cost_basis) / end_cost_basis * 100
+                    elif end_value != 0:
+                        interval_roi_df.loc[curr_date, symbol] = float("inf")
                     else:
-                        # If starting value is zero, check if this is the first time holding
-                        if start_cost_basis == 0 and end_cost_basis != 0:
-                            # First time holding - use cost basis as starting value
-                            interval_roi_df.loc[curr_date, symbol] = (end_value - end_cost_basis) / end_cost_basis * 100
-                        elif end_value != 0:
-                            interval_roi_df.loc[curr_date, symbol] = float("inf")
-                        else:
-                            interval_roi_df.loc[curr_date, symbol] = 0.0
+                        interval_roi_df.loc[curr_date, symbol] = 0.0
 
         # Compute Total column using full portfolio totals (including cash).
         # Using the full Total avoids distortion from accounts with negative positions,
@@ -900,7 +898,7 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                 start_v = total_value.iloc[i - 1]
                 start_cb = total_cb.iloc[i - 1]
                 cb_change = end_cb - start_cb
-                if start_v > 0:
+                if start_v > 0 and cb_change <= start_v:
                     total_roi.iloc[i] = (end_v - start_v - cb_change) / start_v * 100
                 elif end_cb != 0:
                     total_roi.iloc[i] = (end_v - end_cb) / end_cb * 100
