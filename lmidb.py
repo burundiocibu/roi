@@ -1061,8 +1061,25 @@ def print_summary(cursor: sqlite3.Cursor, account_filters: list[str] | None = No
             print(f"{account_info}: No positions table found.")
 
     print("\nTickers tracked:")
-    for k, v in get_candles_dates(cursor).items():
-        print(f"{k:8}: {v[0].date()} to {v[1].date()}")
+    cursor.execute(
+        """
+        SELECT t.symbol, at.asset_type, at.equity_type
+        FROM tickers t
+        LEFT JOIN asset_types at ON t.asset_type_id = at.id
+        ORDER BY t.symbol
+        """
+    )
+    ticker_types = {row["symbol"]: (row["asset_type"] or "", row["equity_type"] or "") for row in cursor.fetchall()}
+    candle_dates = get_candles_dates(cursor)
+    all_symbols = sorted(set(list(ticker_types.keys()) + list(candle_dates.keys())))
+    for sym in all_symbols:
+        asset_type, equity_type = ticker_types.get(sym, ("", ""))
+        type_str = asset_type
+        if equity_type:
+            type_str += f"/{equity_type}"
+        dates = candle_dates.get(sym)
+        date_str = f"{dates[0].date()} to {dates[1].date()}" if dates else "no candle data"
+        print(f"{sym:10} {type_str:30} {date_str}")
 
 
 if __name__ == "__main__":
