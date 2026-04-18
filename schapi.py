@@ -43,6 +43,17 @@ def get_daily(client, ticker, start_datetime=None, end_datetime=None):
     return resp.json()
 
 
+def get_instrument(client, symbol):
+    """Fetch instrument metadata for a single symbol.
+    Returns the first instrument dict from the response, or None if not found."""
+    from schwab.client import Client
+
+    resp = client.get_instruments([symbol], projection=Client.Instrument.Projection.SYMBOL_SEARCH)
+    assert resp.status_code == httpx.codes.OK
+    instruments = resp.json().get("instruments", [])
+    return instruments[0] if instruments else None
+
+
 def history_to_dataframe(history_json):
     """Convert Schwab historical price JSON to Pandas DataFrame"""
     print(f"{history_json}")

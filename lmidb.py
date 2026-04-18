@@ -75,7 +75,7 @@ def create_initial_tables(cursor: sqlite3.Cursor) -> None:
             symbol TEXT UNIQUE)
         """
     )
-    cursor.executemany("INSERT OR IGNORE INTO tickers VALUES (?)", [[cash]])
+    cursor.executemany("INSERT OR IGNORE INTO tickers (symbol) VALUES (?)", [[cash]])
 
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS candles(
@@ -90,6 +90,25 @@ def create_initial_tables(cursor: sqlite3.Cursor) -> None:
             FOREIGN KEY (symbol) REFERENCES tickers(symbol))
         """
     )
+
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS asset_types(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_type TEXT NOT NULL,
+            equity_type TEXT NOT NULL DEFAULT '',
+            UNIQUE(asset_type, equity_type))
+        """
+    )
+    cursor.connection.commit()
+
+    migrate_schema(cursor)
+
+
+def migrate_schema(cursor: sqlite3.Cursor) -> None:
+    """Idempotent migrations for existing databases. Safe to call every startup."""
+    cols = [r[1] for r in cursor.execute("PRAGMA table_info(tickers)").fetchall()]
+    if "asset_type_id" not in cols:
+        cursor.execute("ALTER TABLE tickers ADD COLUMN asset_type_id INTEGER")
     cursor.connection.commit()
 
 
@@ -102,7 +121,7 @@ def add_ticker(cursor: sqlite3.Cursor, symbol: str) -> None:
     :param symbol: ticker symbol to add
     :type symbol: str
     """
-    cursor.execute(f"INSERT OR IGNORE INTO tickers VALUES ('{symbol}')")
+    cursor.execute("INSERT OR IGNORE INTO tickers (symbol) VALUES (?)", (symbol,))
     cursor.connection.commit()
 
 
@@ -539,6 +558,53 @@ def update_candles(cursor: sqlite3.Cursor) -> None:
         print(", ", end="", flush=True)
     cursor.connection.commit()
     print("\nCandle updates complete.")
+
+
+def update_asset_types(cursor: sqlite3.Cursor) -> None:
+    """Populate tickers.asset_type_id for any ticker missing it.
+    Skips cash and 9-digit CUSIP symbols — they stay NULL."""
+    cursor.execute(
+        "SELECT symbol FROM tickers WHERE asset_type_id IS NULL AND symbol != ? AND symbol != ''",
+        (cash,),
+    )
+    symbols = [row[0] for row in cursor.fetchall()]
+    symbols = [s for s in symbols if not re.fullmatch(r"\d{9}", s)]
+    if not symbols:
+        print("No tickers need asset_type lookup.")
+        return
+
+    client = schapi.get_client()
+    for symbol in symbols:
+        print(f"{symbol} ", end="", flush=True)
+        try:
+            inst = schapi.get_instrument(client, symbol)
+        except Exception as e:
+            print(f"(error: {e}), ", end="", flush=True)
+            continue
+        if inst is None:
+            print("(not found), ", end="", flush=True)
+            continue
+        asset_type = inst.get("assetType")
+        equity_type = inst.get("equityType") or ""
+        if not asset_type:
+            print("(no assetType), ", end="", flush=True)
+            continue
+        cursor.execute(
+            "INSERT OR IGNORE INTO asset_types(asset_type, equity_type) VALUES (?, ?)",
+            (asset_type, equity_type),
+        )
+        cursor.execute(
+            "SELECT id FROM asset_types WHERE asset_type = ? AND equity_type = ?",
+            (asset_type, equity_type),
+        )
+        asset_type_id = cursor.fetchone()[0]
+        cursor.execute(
+            "UPDATE tickers SET asset_type_id = ? WHERE symbol = ?",
+            (asset_type_id, symbol),
+        )
+        print(f"({asset_type}/{equity_type or '-'}), ", end="", flush=True)
+    cursor.connection.commit()
+    print("\nAsset type updates complete.")
 
 
 def get_closing_values(cursor: sqlite3.Cursor, tickers: list[str], date: dt.date | dt.datetime) -> pd.Series:
@@ -1035,6 +1101,7 @@ if __name__ == "__main__":
             "update-positions",
             "update-transactions",
             "update-candles",
+            "update-asset-types",
             "summary",
             "positions",
             "transactions",
@@ -1056,17 +1123,22 @@ if __name__ == "__main__":
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
+    create_initial_tables(cursor)
+
     match args.action:
         case "update":
             update_transactions(cursor, args.schwab_data, args.add_old, args.account)
             update_positions(cursor, args.schwab_data, args.add_old, args.account)
             update_candles(cursor)
+            update_asset_types(cursor)
         case "update-positions":
             update_positions(cursor, args.schwab_data, args.add_old, args.account)
         case "update-transactions":
             update_transactions(cursor, args.schwab_data, args.add_old, args.account)
         case "update-candles":
             update_candles(cursor)
+        case "update-asset-types":
+            update_asset_types(cursor)
         case "summary":
             print_summary(cursor, args.account)
         case "accounts":
