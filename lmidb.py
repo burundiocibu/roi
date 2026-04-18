@@ -403,6 +403,8 @@ def update_schwab_positions(fn: Path, account_id: int, cursor: sqlite3.Cursor) -
     :type cursor: sqlite3.Cursor
     """
     new_positions = 0
+    if args.debug:
+        print(f"Reading {fn}")
     table_name = f"positions_{account_id}"
     with open(fn, newline="") as csvfile:
         # The first line is intro line header with the date
@@ -412,6 +414,8 @@ def update_schwab_positions(fn: Path, account_id: int, cursor: sqlite3.Cursor) -
         pos_date = dt.datetime.strptime(ymd, "%Y/%m/%d")
         reader = csv.DictReader(csvfile)
         for row in reader:
+            if args.debug:
+                print(f"row: {row}")
             symbol = row["Symbol"]
             if not symbol:
                 print("Empty symbol")
@@ -420,7 +424,7 @@ def update_schwab_positions(fn: Path, account_id: int, cursor: sqlite3.Cursor) -
                 value = fns_to_float(row["Mkt Val (Market Value)"])
                 quantity = value
                 price = 1
-            elif symbol == "Account Total":
+            elif "Total" in symbol:
                 continue
             else:
                 quantity = fns_to_float(row["Qty (Quantity)"])

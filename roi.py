@@ -124,12 +124,23 @@ def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dic
         print(f"No accounts found with names: {', '.join(account_filters)}")
         return {}
 
+    cursor.execute(
+        """
+        SELECT t.symbol FROM tickers t
+        JOIN asset_types at ON t.asset_type_id = at.id
+        WHERE at.asset_type = 'EQUITY'
+        """
+    )
+    equity_tickers = {row[0] for row in cursor.fetchall()}
+
     all_history = {}
 
     for account in accounts:
         if args.debug:
             print(f"Computing history for {account["name"]}")
-        all_history[account["name"]] = compute_history(cursor, account["id"])
+        h = compute_history(cursor, account["id"])
+        h["equity_tickers"] = equity_tickers
+        all_history[account["name"]] = h
 
     return all_history
 
@@ -631,24 +642,48 @@ def compute_cumulative_roi(
     return roi_df
 
 
+def add_equity_total(df: pd.DataFrame, equity_tickers: set[str]) -> pd.DataFrame:
+    """Replace individual EQUITY-type ticker columns with a single 'Equities' sum column before 'Total'."""
+    equity_cols = [c for c in df.columns if c in equity_tickers]
+    if not equity_cols:
+        return df
+    df = df.copy()
+    insert_pos = df.columns.get_loc("Total") if "Total" in df.columns else len(df.columns)
+    df.insert(insert_pos, "Equities", df[equity_cols].sum(axis=1))
+    df.drop(columns=equity_cols, inplace=True)
+    return df
+
+
 def cost_basis(all_history: dict) -> None:
     for account, history in all_history.items():
-        print(f"Cost basis for {account}:\n{history["cost_basis"]}")
+        cb = history["cost_basis"]
+        if args.equity_sum:
+            cb = add_equity_total(cb, history["equity_tickers"])
+        print(f"Cost basis for {account}:\n{cb}")
 
 
 def show_positions(all_history: dict) -> None:
     for account, history in all_history.items():
-        print(f"Positions for {account}:\n{history["positions"]}")
+        pos = history["positions"]
+        if args.equity_sum:
+            pos = add_equity_total(pos, history["equity_tickers"])
+        print(f"Positions for {account}:\n{pos}")
 
 
 def show_value(all_history: dict) -> None:
     for account, history in all_history.items():
-        print(f"Market value for {account}:\n{history["value"]}")
+        val = history["value"]
+        if args.equity_sum:
+            val = add_equity_total(val, history["equity_tickers"])
+        print(f"Market value for {account}:\n{val}")
 
 
 def income(all_history: dict) -> None:
     for account, history in all_history.items():
-        print(f"Income for {account}:\n{history["income"]}")
+        inc = history["income"]
+        if args.equity_sum:
+            inc = add_equity_total(inc, history["equity_tickers"])
+        print(f"Income for {account}:\n{inc}")
 
 
 def summary(all_history: dict) -> None:
@@ -908,17 +943,18 @@ def full_report(all_history: dict) -> None:
             print(combined)
         else:
             # Show separate tables for all securities
+            equity_tickers = history["equity_tickers"] if args.equity_sum else set()
             if args.verbosity > 0:
-                print(f"\nPositions\n{positions}")
-                print(f"\nCost Basis\n{cost_basis_data}")
-                print(f"\nMarket Value\n{value}")
-                print(f"\nIncome\n{income_data}")
+                print(f"\nPositions\n{add_equity_total(positions, equity_tickers)}")
+                print(f"\nCost Basis\n{add_equity_total(cost_basis_data, equity_tickers)}")
+                print(f"\nMarket Value\n{add_equity_total(value, equity_tickers)}")
+                print(f"\nIncome\n{add_equity_total(income_data, equity_tickers)}")
                 print(f"\nROI (%)\n{roi_df}\n")
             else:
-                print(f"\nPositions\n{positions.iloc[-1].to_frame().T}")
-                print(f"\nCost Basis\n{cost_basis_data.iloc[-1].to_frame().T}")
-                print(f"\nMarket Value\n{value.iloc[-1].to_frame().T}")
-                print(f"\nIncome\n{income_data.iloc[-1].to_frame().T}")
+                print(f"\nPositions\n{add_equity_total(positions, equity_tickers).iloc[-1].to_frame().T}")
+                print(f"\nCost Basis\n{add_equity_total(cost_basis_data, equity_tickers).iloc[-1].to_frame().T}")
+                print(f"\nMarket Value\n{add_equity_total(value, equity_tickers).iloc[-1].to_frame().T}")
+                print(f"\nIncome\n{add_equity_total(income_data, equity_tickers).iloc[-1].to_frame().T}")
                 print(f"\nROI (%)\n{roi_df.iloc[-1].to_frame().T}\n")
 
 
@@ -986,6 +1022,13 @@ def main(enable_profiling=False):
         help="Action to take.",
     )
     parser.add_argument("-v", "--verbosity", action="count", default=0, help="Increase output verbosity.")
+    parser.add_argument(
+        "--no-equity-sum",
+        action="store_false",
+        dest="equity_sum",
+        default=True,
+        help="Disable the Equities sum column in output tables.",
+    )
     global args
     args = parser.parse_args()
 
