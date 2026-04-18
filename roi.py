@@ -829,6 +829,12 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                 end_value = value_df.loc[curr_date, symbol]
                 end_cost_basis = cost_basis_data.loc[curr_date, symbol]
 
+                # Treat None/NaN as 0
+                if end_value is None or (isinstance(end_value, float) and pd.isna(end_value)):
+                    end_value = 0.0
+                if end_cost_basis is None or (isinstance(end_cost_basis, float) and pd.isna(end_cost_basis)):
+                    end_cost_basis = 0.0
+
                 if i == 0:
                     # First period - use cost basis as the starting value
                     if end_cost_basis != 0:
@@ -842,6 +848,11 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                     # Starting value and cost basis for this period
                     start_value = value_df.loc[prev_date, symbol]
                     start_cost_basis = cost_basis_data.loc[prev_date, symbol]
+
+                    if start_value is None or (isinstance(start_value, float) and pd.isna(start_value)):
+                        start_value = 0.0
+                    if start_cost_basis is None or (isinstance(start_cost_basis, float) and pd.isna(start_cost_basis)):
+                        start_cost_basis = 0.0
 
                     # Change in cost basis represents net investment/divestment during period
                     cost_basis_change = end_cost_basis - start_cost_basis
@@ -900,7 +911,7 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
 
 
 def annual_roi(all_history: dict) -> None:
-    """Print annualized (CAGR) ROI (%) for each security, calculated from first date held to each period-end.
+    """Print annualized (CAGR) ROI (%) for each security, calculated from first date held to each period-end. most-recent row only unless -v.
 
     Args:
         all_history: Dict keyed by account name containing history dicts from compute_history().
@@ -1028,10 +1039,7 @@ def main(enable_profiling=False):
         "summary": summary,
         "value": show_value,
     }
-    action_help = "\n".join(
-        f"  {name:14} {inspect.getdoc(fn).splitlines()[0]}"
-        for name, fn in action_funcs.items()
-    )
+    action_help = "\n".join(f"  {name:14} {inspect.getdoc(fn).splitlines()[0]}" for name, fn in action_funcs.items())
     parser = argparse.ArgumentParser(
         description="Investment Performance Calculator",
         epilog=f"actions:\n{action_help}\n\nUse Schwab investment account credentials if prompted for a login.",
