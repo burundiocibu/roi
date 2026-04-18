@@ -452,15 +452,19 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
 
     # Collapse individual EQUITY-type tickers into a single "Equities" aggregate column
     if args.equity_sum and not args.ticker:
-        for df in [value, cost_basis, income, short_term_gains, long_term_gains]:
-            equity_cols = [c for c in df.columns if c in equity_tickers]
-            if equity_cols:
-                df["Equities"] = df[equity_cols].sum(axis=1)
-                df.drop(columns=equity_cols, inplace=True)
-        eq_pos_cols = [c for c in positions.columns if c in equity_tickers]
-        if eq_pos_cols:
-            positions["Equities"] = positions[eq_pos_cols].sum(axis=1)
-            positions.drop(columns=eq_pos_cols, inplace=True)
+        def _collapse_equities(df):
+            eq_cols = [c for c in df.columns if c in equity_tickers]
+            if not eq_cols:
+                return df
+            equities = df[eq_cols].sum(axis=1).rename("Equities")
+            return pd.concat([df.drop(columns=eq_cols), equities], axis=1)
+
+        value = _collapse_equities(value)
+        cost_basis = _collapse_equities(cost_basis)
+        income = _collapse_equities(income)
+        short_term_gains = _collapse_equities(short_term_gains)
+        long_term_gains = _collapse_equities(long_term_gains)
+        positions = _collapse_equities(positions)
 
     # Add Total column to value after filtering
     value["Total"] = value.sum(axis=1)
