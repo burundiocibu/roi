@@ -138,15 +138,13 @@ def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dic
     for account in accounts:
         if args.debug:
             print(f"Computing history for {account["name"]}")
-        h = compute_history(cursor, account["id"])
-        h["equity_tickers"] = equity_tickers
-        all_history[account["name"]] = h
+        all_history[account["name"]] = compute_history(cursor, account["id"], equity_tickers)
 
     return all_history
 
 
 @timeit
-def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
+def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set[str]) -> dict:
     """Compute monthly positions, short term gains, long term gains, income, management fees, and distributions
     for the indicated account."""
 
@@ -420,6 +418,18 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
         cost_basis = cost_basis[lpi]
         value = value[lpi]
 
+    # Collapse individual EQUITY-type tickers into a single "Equities" aggregate column
+    if args.equity_sum and not args.ticker:
+        for df in [value, cost_basis, income, short_term_gains, long_term_gains]:
+            equity_cols = [c for c in df.columns if c in equity_tickers]
+            if equity_cols:
+                df["Equities"] = df[equity_cols].sum(axis=1)
+                df.drop(columns=equity_cols, inplace=True)
+        eq_pos_cols = [c for c in positions.columns if c in equity_tickers]
+        if eq_pos_cols:
+            positions["Equities"] = positions[eq_pos_cols].sum(axis=1)
+            positions.drop(columns=eq_pos_cols, inplace=True)
+
     # Add Total column to value after filtering
     value["Total"] = value.sum(axis=1)
 
@@ -429,8 +439,8 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int) -> dict:
     # Add Total column to income after filtering
     income["Total"] = income.sum(axis=1)
 
-    # Compute cumulative ROI
-    cumulative_roi = compute_cumulative_roi(cursor, positions, cost_basis)
+    # Compute cumulative ROI directly from pre-computed value and cost_basis
+    cumulative_roi = compute_cumulative_roi(value, cost_basis)
 
     # Add Total ROI column - overall portfolio return
     total_cost_basis = cost_basis["Total"]
@@ -467,7 +477,7 @@ def compute_cost_basis(
     Uses the pre-computed value DataFrame to avoid redundant database lookups.
     """
     if args.debug:
-        print("Computing cost basis for account {account_id}")
+        print(f"Computing cost basis for account {account_id}")
     dtie = positions.index
     cost_basis = pd.DataFrame(index=dtie, columns=symbols)
     cost_basis[:] = 0.0
@@ -583,8 +593,6 @@ def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.Data
     Returns a DataFrame with the same structure as positions but containing
     market values (quantity * price) instead of quantities.
     """
-    if args.debug:
-        print("Computing value for account {account_id}")
     dtie = positions.index
     value = pd.DataFrame(index=dtie, columns=symbols)
     value[:] = 0.0
@@ -604,86 +612,44 @@ def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.Data
 
 @timeit
 def compute_cumulative_roi(
-    cursor: sqlite3.Cursor,
-    positions: pd.DataFrame,
-    cost_basis_data: pd.DataFrame,
+    value_df: pd.DataFrame,
+    cost_basis_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Compute cumulative ROI for each security at each point in time.
-    Returns a DataFrame with ROI percentages showing the total return since
-    the initial investment for each security.
+    Uses pre-computed value and cost_basis DataFrames directly.
     """
     if args.debug:
-        print("Computing cumulitive ROI for account {account_id}")
-    symbols = [s for s in positions.columns if s != lmidb.cash]
-
-    # Create ROI dataframe
-    roi_df = pd.DataFrame(index=positions.index, columns=symbols)
+        print(f"compute_cumulative_roi")
+    symbols = [c for c in value_df.columns if c not in (lmidb.cash, "Total")]
+    roi_df = pd.DataFrame(index=value_df.index, columns=symbols, dtype=float)
     roi_df[:] = 0.0
-
-    # Calculate ROI for each period
-    for date_idx in positions.index:
-        # Get closing prices for this date
-        closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
-
-        for symbol in symbols:
-            quantity = positions.loc[date_idx, symbol]
-            cost_basis_val = cost_basis_data.loc[date_idx, symbol]
-
-            # Current market value
-            current_value = quantity * closings[symbol]
-
-            if quantity != 0 and cost_basis_val != 0:
-                # ROI as percentage
-                roi_df.loc[date_idx, symbol] = (current_value - cost_basis_val) / cost_basis_val * 100
-            else:
-                roi_df.loc[date_idx, symbol] = 0.0
-
+    for symbol in symbols:
+        cb = cost_basis_df[symbol]
+        val = value_df[symbol]
+        cb_num = pd.to_numeric(cb, errors="coerce").replace(0, float("nan"))
+        roi_df[symbol] = ((pd.to_numeric(val, errors="coerce") - cb_num) / cb_num * 100).fillna(0.0)
     return roi_df
-
-
-def add_equity_total(df: pd.DataFrame, equity_tickers: set[str]) -> pd.DataFrame:
-    """Replace individual EQUITY-type ticker columns with a single 'Equities' sum column before 'Total'."""
-    equity_cols = [c for c in df.columns if c in equity_tickers]
-    if not equity_cols:
-        return df
-    df = df.copy()
-    insert_pos = df.columns.get_loc("Total") if "Total" in df.columns else len(df.columns)
-    df.insert(insert_pos, "Equities", df[equity_cols].sum(axis=1))
-    df.drop(columns=equity_cols, inplace=True)
-    return df
 
 
 def cost_basis(all_history: dict) -> None:
     for account, history in all_history.items():
-        cb = history["cost_basis"]
-        if args.equity_sum:
-            cb = add_equity_total(cb, history["equity_tickers"])
-        print(f"Cost basis for {account}:\n{cb}")
+        print(f"Cost basis for {account}:\n{history['cost_basis']}")
 
 
 def show_positions(all_history: dict) -> None:
     for account, history in all_history.items():
-        pos = history["positions"]
-        if args.equity_sum:
-            pos = add_equity_total(pos, history["equity_tickers"])
-        print(f"Positions for {account}:\n{pos}")
+        print(f"Positions for {account}:\n{history['positions']}")
 
 
 def show_value(all_history: dict) -> None:
     for account, history in all_history.items():
-        val = history["value"]
-        if args.equity_sum:
-            val = add_equity_total(val, history["equity_tickers"])
-        print(f"Market value for {account}:\n{val}")
+        print(f"Market value for {account}:\n{history['value']}")
 
 
 def income(all_history: dict) -> None:
     for account, history in all_history.items():
-        inc = history["income"]
-        if args.equity_sum:
-            inc = add_equity_total(inc, history["equity_tickers"])
-        print(f"Income for {account}:\n{inc}")
+        print(f"Income for {account}:\n{history['income']}")
 
 
 def summary(all_history: dict) -> None:
@@ -770,26 +736,16 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
         fees = history["fees"]
         distributions = history["distributions"]
 
-        symbols = [s for s in positions.columns if s != lmidb.cash]
-
-        # Create value dataframe for market values
-        value_df = pd.DataFrame(index=positions.index, columns=symbols)
-        value_df[:] = 0.0
+        value_df = history["value"]
+        symbols = [s for s in value_df.columns if s not in (lmidb.cash, "Total")]
 
         # Create interval ROI dataframe
-        interval_roi_df = pd.DataFrame(index=positions.index, columns=symbols)
+        interval_roi_df = pd.DataFrame(index=value_df.index, columns=symbols)
         interval_roi_df[:] = 0.0
 
-        # Calculate market values for each period
-        for date_idx in positions.index:
-            closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
-            for symbol in symbols:
-                quantity = positions.loc[date_idx, symbol]
-                value_df.loc[date_idx, symbol] = quantity * closings[symbol]
-
         # Calculate ROI for each interval
-        for i in range(len(positions.index)):
-            curr_date = positions.index[i]
+        for i in range(len(value_df.index)):
+            curr_date = value_df.index[i]
 
             for symbol in symbols:
                 # Ending value and cost basis for this period
@@ -804,7 +760,7 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                         interval_roi_df.loc[curr_date, symbol] = 0.0
                 else:
                     # Subsequent periods - compare to previous period
-                    prev_date = positions.index[i - 1]
+                    prev_date = value_df.index[i - 1]
 
                     # Starting value and cost basis for this period
                     start_value = value_df.loc[prev_date, symbol]
@@ -943,18 +899,17 @@ def full_report(all_history: dict) -> None:
             print(combined)
         else:
             # Show separate tables for all securities
-            equity_tickers = history["equity_tickers"] if args.equity_sum else set()
             if args.verbosity > 0:
-                print(f"\nPositions\n{add_equity_total(positions, equity_tickers)}")
-                print(f"\nCost Basis\n{add_equity_total(cost_basis_data, equity_tickers)}")
-                print(f"\nMarket Value\n{add_equity_total(value, equity_tickers)}")
-                print(f"\nIncome\n{add_equity_total(income_data, equity_tickers)}")
+                print(f"\nPositions\n{positions}")
+                print(f"\nCost Basis\n{cost_basis_data}")
+                print(f"\nMarket Value\n{value}")
+                print(f"\nIncome\n{income_data}")
                 print(f"\nROI (%)\n{roi_df}\n")
             else:
-                print(f"\nPositions\n{add_equity_total(positions, equity_tickers).iloc[-1].to_frame().T}")
-                print(f"\nCost Basis\n{add_equity_total(cost_basis_data, equity_tickers).iloc[-1].to_frame().T}")
-                print(f"\nMarket Value\n{add_equity_total(value, equity_tickers).iloc[-1].to_frame().T}")
-                print(f"\nIncome\n{add_equity_total(income_data, equity_tickers).iloc[-1].to_frame().T}")
+                print(f"\nPositions\n{positions.iloc[-1].to_frame().T}")
+                print(f"\nCost Basis\n{cost_basis_data.iloc[-1].to_frame().T}")
+                print(f"\nMarket Value\n{value.iloc[-1].to_frame().T}")
+                print(f"\nIncome\n{income_data.iloc[-1].to_frame().T}")
                 print(f"\nROI (%)\n{roi_df.iloc[-1].to_frame().T}\n")
 
 
