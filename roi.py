@@ -878,6 +878,34 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                         else:
                             interval_roi_df.loc[curr_date, symbol] = 0.0
 
+        # Compute Total column using full portfolio totals (including cash).
+        # Using the full Total avoids distortion from accounts with negative positions,
+        # and is consistent with how cumulative_roi["Total"] is computed.
+        def _to_float(series):
+            return pd.to_numeric(series, errors="coerce").fillna(0.0)
+
+        total_value = _to_float(value_df["Total"])
+        total_cb = _to_float(cost_basis_data["Total"])
+        total_roi = pd.Series(index=value_df.index, dtype=float)
+        for i in range(len(value_df.index)):
+            end_v = total_value.iloc[i]
+            end_cb = total_cb.iloc[i]
+            if i == 0:
+                total_roi.iloc[i] = (end_v - end_cb) / end_cb * 100 if end_cb != 0 else 0.0
+            else:
+                start_v = total_value.iloc[i - 1]
+                start_cb = total_cb.iloc[i - 1]
+                cb_change = end_cb - start_cb
+                if start_v > 0:
+                    total_roi.iloc[i] = (end_v - start_v - cb_change) / start_v * 100
+                elif end_cb != 0:
+                    total_roi.iloc[i] = (end_v - end_cb) / end_cb * 100
+                elif end_v != 0:
+                    total_roi.iloc[i] = float("inf")
+                else:
+                    total_roi.iloc[i] = 0.0
+        interval_roi_df["Total"] = total_roi
+
         if args.ticker:
             # Create detailed view for single ticker
             ticker = args.ticker
