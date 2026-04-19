@@ -452,6 +452,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
 
     # Collapse individual EQUITY-type tickers into a single "Equities" aggregate column
     if args.equity_sum and not args.ticker:
+
         def _collapse_equities(df):
             eq_cols = [c for c in df.columns if c in equity_tickers]
             if not eq_cols:
@@ -1148,6 +1149,7 @@ def main(enable_profiling=False):
 
     match args.action:
         case "annual-roi":
+            args.all = True
             annual_roi(all_history)
         case "cost-basis":
             cost_basis(all_history)
@@ -1158,10 +1160,12 @@ def main(enable_profiling=False):
         case "income":
             income(all_history)
         case "interval-roi":
+            args.all = True
             interval_roi(cursor, all_history)
         case "positions":
             show_positions(all_history)
         case "roi":
+            args.all = True
             cumulitive_roi(cursor, all_history)
         case "summary":
             summary(all_history)
