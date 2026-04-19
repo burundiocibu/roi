@@ -767,6 +767,9 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
             # Create detailed view for single ticker
             ticker = args.ticker
 
+            if ticker not in positions.columns:
+                continue
+
             # Get closing prices for all periods
             closing_prices = pd.Series(index=positions.index, dtype=float)
             for date_idx in positions.index:
@@ -913,6 +916,9 @@ def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
             # Create detailed view for single ticker
             ticker = args.ticker
 
+            if ticker not in positions.columns:
+                continue
+
             # Get closing prices for all periods
             closing_prices = pd.Series(index=positions.index, dtype=float)
             for date_idx in positions.index:
@@ -1014,6 +1020,8 @@ def full_report(all_history: dict) -> None:
         # If showing a single ticker, combine all metrics into one dataframe
         if args.ticker:
             ticker = args.ticker
+            if ticker not in positions.columns:
+                continue
             # Create combined dataframe with all metrics for this ticker
             combined = pd.DataFrame(index=positions.index)
             combined["Quantity"] = positions[ticker]

@@ -138,6 +138,12 @@ def main():
         type=str,
         help="Filter to account name(s). Can be repeated.",
     )
+    parser.add_argument(
+        "-l", "--limit",
+        type=int,
+        default=None,
+        help="Limit the report to N intervals back",
+    )
     parser.add_argument("-v", "--verbosity", action="count", default=0)
     args = parser.parse_args()
 
@@ -172,8 +178,12 @@ def main():
     display.columns = [d.date() for d in display.columns]
 
     # Slice to displayed window first, then compute Total from those columns only
-    if args.verbosity == 0:
-        display = display.iloc[:, -12:]
+    limit = args.limit
+    if limit is None and args.verbosity == 0:
+        limit = 12
+
+    if limit is not None:
+        display = display.iloc[:, -limit:]
 
     display["Total"] = display.apply(
         lambda row: ((1 + row.fillna(0) / 100).prod() - 1) * 100, axis=1
