@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 """Price-based performance report for tickers currently held across accounts."""
 
 import argparse

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 """
 lmidb: little-mann investment database
 a sqlite db and functions to populate it from data from schwab
