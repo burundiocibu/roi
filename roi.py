@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 
 import argparse
 import cProfile
@@ -148,13 +148,11 @@ def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dic
         print(f"No accounts found with names: {', '.join(account_filters)}")
         return {}
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT t.symbol FROM tickers t
         JOIN asset_types at ON t.asset_type_id = at.id
         WHERE at.asset_type = 'EQUITY'
-        """
-    )
+        """)
     equity_tickers = {row[0] for row in cursor.fetchall()}
 
     all_history = {}
@@ -195,12 +193,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
             (args.ticker,),
         )
     else:
-        cursor.execute(
-            f"""
+        cursor.execute(f"""
             SELECT * FROM positions_{account_id} 
             WHERE Date = (SELECT MAX(Date) FROM positions_{account_id})
-        """
-        )
+        """)
     latest_position_df = pd.DataFrame([dict(row) for row in cursor])
 
     if len(latest_position_df) > 0:
@@ -348,6 +344,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                     distributions[month] -= amount
                 case "Pr Yr Cash Div":
                     positions.loc[month, cash] -= amount
+                case "Qualified Dividend":
+                    positions.loc[month, cash] -= amount
+                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    income.loc[month, symbol] += amount # type: ignore
                 case "Reinvest Dividend":
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount # type: ignore
