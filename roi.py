@@ -177,6 +177,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
         Dict with keys: positions, stg, ltg, income, fees, distributions, cost_basis, value, cumulative_roi —
         each a DataFrame indexed by period-end date.
     """
+    account_name = lmidb.get_account_name(cursor, account_id)
 
     cursor.execute(f"SELECT MIN(Date) as first_date, MAX(Date) as last_date FROM transactions_{account_id}")
     result = cursor.fetchone()
@@ -290,9 +291,8 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                     print(f" --- {cash}:{positions.loc[month, cash]:.2f} -> ", end="")
 
             # The sign is reversed on transactions because we are going backwards in time
-            # fmt: off
             match action:
-                case "Advisor Fee":
+                case "Advisor Fee" | "ADR Mgmt Fee" | "ADR Mgmt Fee Adj":
                     # these are negative to start with
                     positions.loc[month, cash] -= amount
                     mgmt_fees[month] -= amount
@@ -304,27 +304,29 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                     short_term_gains.loc[month, cash] += amount
                 case "Bond Interest":
                     positions.loc[month, cash] += amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Buy":
-                    positions.loc[month, symbol] -= quantity # type: ignore
+                    positions.loc[month, symbol] -= quantity  # type: ignore
                     positions.loc[month, cash] -= amount
-                case "Cash Dividend":
+                case "Cash Dividend" | "Non-Qualified Div":
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Div Adj" | "Dividend Adj" | "Div Adjustment":
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
+                case "Foreign Tax Paid" | "Foreign Tax Reclaim Adj":
+                    positions.loc[month, cash] -= amount
                 case "Full Redemption":
-                    positions.loc[month, symbol] -= amount # type: ignore
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    positions.loc[month, symbol] -= amount  # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Full Redemption Adj":
                     positions.loc[month, cash] -= amount
-                    long_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    long_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Funds Received":
                     positions.loc[month, cash] -= amount
                     distributions.loc[month] -= amount
@@ -334,60 +336,60 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                         positions.loc[month, symbol] -= quantity
                 case "Long Term Cap Gain":
                     positions.loc[month, cash] -= amount
-                    long_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    long_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Long Term Cap Gain Reinvest":
                     positions.loc[month, cash] -= amount
-                    long_term_gains.loc[month, symbol] += amount # type: ignore
+                    long_term_gains.loc[month, symbol] += amount  # type: ignore
                 case "MoneyLink Transfer":
                     positions.loc[month, cash] -= amount
                     distributions[month] -= amount
                 case "Pr Yr Cash Div":
                     positions.loc[month, cash] -= amount
-                case "Qualified Dividend":
+                case "Qualified Dividend" | "Special Qual Div":
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    long_term_gains.loc[month, symbol] += amount  # type: ignore
                 case "Reinvest Dividend":
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
                 case "Reinvest Shares":
                     positions.loc[month, cash] -= amount
-                    positions.loc[month, symbol] -= quantity # type: ignore
+                    positions.loc[month, symbol] -= quantity  # type: ignore
                 case "Reinvestment Adj":
-                    positions.loc[month, symbol] -= quantity # type: ignore
+                    positions.loc[month, symbol] -= quantity  # type: ignore
                     positions.loc[month, cash] -= amount
                     short_term_gains.loc[month, symbol] += amount  # type: ignore
                 case "Security Transfer":
                     positions.loc[month, cash] -= amount
                     if symbol != "":
-                        positions.loc[month, symbol] -= quantity # type: ignore
+                        positions.loc[month, symbol] -= quantity  # type: ignore
                 case "Sell":
-                    positions.loc[month, symbol] += quantity # type: ignore
+                    positions.loc[month, symbol] += quantity  # type: ignore
                     positions.loc[month, cash] -= amount
-                    long_term_gains.loc[month, symbol] += amount # type: ignore
+                    long_term_gains.loc[month, symbol] += amount  # type: ignore
                 case "Short Term Cap Gain":
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Short Term Cap Gain Reinvest":
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Special Dividend":
                     positions.loc[month, cash] -= amount
-                    short_term_gains.loc[month, symbol] += amount # type: ignore
-                    income.loc[month, symbol] += amount # type: ignore
-                case "Stock Split":
-                    positions.loc[month, symbol] -= quantity # type: ignore
+                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
+                case "Stock Split" | "Stock Merger":
+                    positions.loc[month, symbol] -= quantity  # type: ignore
                     # For stock splits, cost basis total remains same
                     # but we need to track the quantity change
                 case "Wire Sent":
                     positions.loc[month, cash] -= amount
                     distributions[month] -= amount
                 case _:
-                    print(f"Unhandled action: i:{i}")
-                    print(f"{tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}")
+                    print(
+                        f"Unhandled action in {account_name}, {tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}"
+                    )
             # fmt: off
             if args.debug:
                 if symbol != "":
@@ -606,8 +608,8 @@ def compute_cost_basis(
                             running_cost_basis[symbol] -= quantity * avg_cost_per_share
                         elif args.debug:
                             print(f"Warning: Sell with no shares held for {symbol} on {tdate}")
-                    case "Stock Split":
-                        # Stock splits don't change cost basis
+                    case "Stock Split" | "Non-Qualified Div":
+                        # These don't change cost basis
                         pass
                 # fmt: on
 
