@@ -299,7 +299,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                 case "Advisor Fee Adj":
                     positions.loc[month, cash] -= amount  # type: ignore
                     mgmt_fees[month] -= amount  # type: ignore
-                case "Bank Interest":
+                case "Bank Interest" | "Cash In Lieu":
                     positions.loc[month, cash] -= amount  # type: ignore
                     short_term_gains.loc[month, cash] += amount  # type: ignore
                 case "Bond Interest":
@@ -323,10 +323,12 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                     positions.loc[month, symbol] -= amount  # type: ignore
                     short_term_gains.loc[month, symbol] += amount  # type: ignore
                     income.loc[month, symbol] += amount  # type: ignore
-                case "Full Redemption Adj":
+                case "Full Redemption Adj" | "CXL Redemption Adj" | "Final Cash Liquid":
                     positions.loc[month, cash] -= amount  # type: ignore
                     long_term_gains.loc[month, symbol] += amount  # type: ignore
                     income.loc[month, symbol] += amount  # type: ignore
+                case "Redemption Adj" | "Final Cash Liquid Adj":
+                    positions.loc[month, symbol] -= quantity  # type: ignore
                 case "Funds Received":
                     positions.loc[month, cash] -= amount  # type: ignore
                     distributions.loc[month] -= amount  # type: ignore
