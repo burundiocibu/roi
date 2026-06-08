@@ -4,9 +4,6 @@ A wrapper to the schwab_py to get historical data.
 https://schwab-py.readthedocs.io/en/latest/ for the underlying api
 """
 
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="authlib")
-
 import datetime as dt
 import httpx
 import json
