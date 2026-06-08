@@ -154,6 +154,12 @@ def get_account_id_by_number(cursor: sqlite3.Cursor, number: str) -> int | None:
     return result[0] if result else None
 
 
+def get_account_name(cursor: sqlite3.Cursor, account_id: int) -> str:
+    cursor.execute("SELECT name FROM accounts WHERE id = ?", (account_id,))
+    result = cursor.fetchone()
+    return result["name"] if result else str(account_id)
+
+
 def add_account(cursor: sqlite3.Cursor, number: str, name: str, owner: str) -> None:
     """
     Adds an account to the accounts table and creates corresponding transactions and positions tables.
