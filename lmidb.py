@@ -754,7 +754,11 @@ def update_positions(
     update_all_schwab_positions_from_dir(data_path, cursor, account_filters)
 
 
-def print_transactions(cursor: sqlite3.Cursor, account_filters: list[str] | None = None) -> None:
+def print_transactions(
+    cursor: sqlite3.Cursor,
+    account_filters: list[str] | None = None,
+    ticker_filter: str | None = None,
+) -> None:
     """
     Prints all transactions for each account (or specific accounts if filtered).
     Creates a DataFrame with transaction details.
@@ -763,6 +767,8 @@ def print_transactions(cursor: sqlite3.Cursor, account_filters: list[str] | None
     :type cursor: sqlite3.Cursor
     :param account_filters: optional list of account names to filter by
     :type account_filters: list[str] | None
+    :param ticker_filter: optional ticker symbol to filter by
+    :type ticker_filter: str | None
     """
     # Get all accounts or filter by name
     if account_filters:
@@ -788,9 +794,15 @@ def print_transactions(cursor: sqlite3.Cursor, account_filters: list[str] | None
 
         # Try to get all transactions for this account
         try:
-            cursor.execute(
-                f"SELECT date, action, symbol, description, quantity, price, fees, amount FROM {table_name} ORDER BY date DESC"
-            )
+            if ticker_filter:
+                cursor.execute(
+                    f"SELECT date, action, symbol, description, quantity, price, fees, amount FROM {table_name} WHERE symbol = ? ORDER BY date DESC",
+                    (ticker_filter,),
+                )
+            else:
+                cursor.execute(
+                    f"SELECT date, action, symbol, description, quantity, price, fees, amount FROM {table_name} ORDER BY date DESC"
+                )
             rows = cursor.fetchall()
 
             if not rows:
@@ -1173,7 +1185,7 @@ if __name__ == "__main__":
         case "positions":
             print_positions(cursor, args.account)
         case "transactions":
-            print_transactions(cursor, args.account)
+            print_transactions(cursor, args.account, args.ticker)
         case "candles":
             print_candles(cursor, args.ticker)
         case _:
