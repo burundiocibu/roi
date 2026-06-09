@@ -321,12 +321,8 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                     positions.loc[month, cash] -= amount  # type: ignore
                 case "Full Redemption":
                     positions.loc[month, symbol] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
                 case "Full Redemption Adj" | "CXL Redemption Adj" | "Final Cash Liquid":
                     positions.loc[month, cash] -= amount  # type: ignore
-                    long_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
                 case "Redemption Adj" | "Final Cash Liquid Adj":
                     positions.loc[month, symbol] -= quantity  # type: ignore
                 case "Funds Received":
@@ -351,6 +347,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                 case "Qualified Dividend" | "Special Qual Div":
                     positions.loc[month, cash] -= amount  # type: ignore
                     long_term_gains.loc[month, symbol] += amount  # type: ignore
+                    income.loc[month, symbol] += amount  # type: ignore
                 case "Reinvest Dividend":
                     positions.loc[month, cash] -= amount  # type: ignore
                     short_term_gains.loc[month, symbol] += amount  # type: ignore
@@ -376,7 +373,6 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
                 case "Short Term Cap Gain Reinvest":
                     positions.loc[month, cash] -= amount  # type: ignore
                     short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
                 case "Special Dividend":
                     positions.loc[month, cash] -= amount  # type: ignore
                     short_term_gains.loc[month, symbol] += amount  # type: ignore
@@ -480,12 +476,15 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
     income["Total"] = income.sum(axis=1)
 
     # Compute cumulative ROI directly from pre-computed value and cost_basis
-    cumulative_roi = compute_cumulative_roi(value, cost_basis)
+    cumulative_roi = compute_cumulative_roi(value, cost_basis, income)
 
     # Add Total ROI column - overall portfolio return
     total_cost_basis = cost_basis["Total"]
     total_value = value["Total"]
-    cumulative_roi["Total"] = ((total_value - total_cost_basis) / total_cost_basis * 100).where(total_cost_basis != 0, 0.0)
+    total_cum_income = pd.to_numeric(income["Total"], errors="coerce").fillna(0.0).cumsum()
+    cumulative_roi["Total"] = ((total_value + total_cum_income - total_cost_basis) / total_cost_basis * 100).where(
+        total_cost_basis != 0, 0.0
+    )
 
     history = {
         "positions": positions,
@@ -609,6 +608,13 @@ def compute_cost_basis(
                             running_cost_basis[symbol] -= quantity * avg_cost_per_share
                         elif args.debug:
                             print(f"Warning: Sell with no shares held for {symbol} on {tdate}")
+                    case "Full Redemption":
+                        running_cost_basis[symbol] = 0.0
+                    case "Redemption Adj" | "Final Cash Liquid Adj":
+                        redeemed_qty = abs(quantity)
+                        qty_before = qty_at_month_end + redeemed_qty
+                        if qty_before > 0 and running_cost_basis[symbol] > 0:
+                            running_cost_basis[symbol] -= (redeemed_qty / qty_before) * running_cost_basis[symbol]
                     case "Stock Split" | "Non-Qualified Div":
                         # These don't change cost basis
                         pass
@@ -663,12 +669,14 @@ def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.Data
 def compute_cumulative_roi(
     value_df: pd.DataFrame,
     cost_basis_df: pd.DataFrame,
+    income_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compute cumulative ROI (%) as (value - cost_basis) / cost_basis × 100 for each security and period.
+    """Compute cumulative ROI (%) as (value + cumulative_income - cost_basis) / cost_basis × 100.
 
     Args:
         value_df: Market value DataFrame indexed by period-end date (excludes cash and Total columns).
         cost_basis_df: Cost basis DataFrame with matching index and columns.
+        income_df: Per-period income DataFrame (dividends, interest, etc.) with matching index and columns.
     Returns:
         DataFrame of ROI percentages with the same index; zero where cost basis is zero or None.
     """
@@ -680,8 +688,9 @@ def compute_cumulative_roi(
     for symbol in symbols:
         cb = cost_basis_df[symbol]
         val = value_df[symbol]
+        cum_income = pd.to_numeric(income_df[symbol], errors="coerce").fillna(0.0).cumsum()
         cb_num = pd.to_numeric(cb, errors="coerce").replace(0, float("nan"))
-        roi_df[symbol] = ((pd.to_numeric(val, errors="coerce") - cb_num) / cb_num * 100).fillna(0.0)
+        roi_df[symbol] = ((pd.to_numeric(val, errors="coerce") + cum_income - cb_num) / cb_num * 100).fillna(0.0)
     return roi_df
 
 
@@ -1156,7 +1165,7 @@ def main(enable_profiling=False):
     raw_cursor = conn.cursor()
     cursor = ProfilingCursor(raw_cursor, enable_profiling=enable_profiling or args.debug)
 
-    all_history = compute_all_history(cursor, args)
+    all_history = compute_all_history(cursor, args)  # type: ignore
 
     match args.action:
         case "annual-roi":
@@ -1172,12 +1181,12 @@ def main(enable_profiling=False):
             income(all_history)
         case "interval-roi":
             args.all = True
-            interval_roi(cursor, all_history)
+            interval_roi(cursor, all_history)  # type: ignore
         case "positions":
             show_positions(all_history)
         case "roi":
             args.all = True
-            cumulitive_roi(cursor, all_history)
+            cumulitive_roi(cursor, all_history)  # type: ignore
         case "summary":
             summary(all_history)
         case "value":
