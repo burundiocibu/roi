@@ -160,19 +160,20 @@ def compute_all_history(cursor: sqlite3.Cursor, args: argparse.Namespace) -> dic
     for account in accounts:
         if args.debug:
             print(f"Computing history for {account["name"]}")
-        all_history[account["name"]] = compute_history(cursor, account["id"], equity_tickers)
+        all_history[account["name"]] = compute_history(cursor, account["id"], equity_tickers, args)
 
     return all_history
 
 
 @timeit
-def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set[str]) -> dict:
+def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set[str], args: argparse.Namespace) -> dict:
     """Compute full financial history for one account by walking transactions backward to derive positions, then forward for cost basis.
 
     Args:
         cursor: Database cursor used for all queries.
         account_id: Primary key of the account in the accounts table.
         equity_tickers: Set of ticker symbols classified as EQUITY (used for Equities aggregation).
+        args: Parsed CLI arguments.
     Returns:
         Dict with keys: positions, stg, ltg, income, fees, distributions, cost_basis, value, cumulative_roi —
         each a DataFrame indexed by period-end date.
@@ -211,10 +212,10 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
     # start dataframe with last day of the month previous to the last transaction
     # end with the most recent position
     start_date = dt.date(first_transaction_date.year, first_transaction_date.month, 1) - dt.timedelta(days=1)
-    dtie = list(pd.date_range(start=start_date, end=latest_position_date, freq="ME").date)
-    if dtie[-1] < latest_position_date.date():
-        dtie.append(latest_position_date.date())
-    dtie = pd.Series(dtie)
+    period_dates = list(pd.date_range(start=start_date, end=latest_position_date, freq="ME").date)
+    if period_dates[-1] < latest_position_date.date():
+        period_dates.append(latest_position_date.date())
+    period_dates = pd.Series(period_dates)
 
     if args.ticker:
         symbols = [args.ticker, lmidb.cash]  # Always include cash
@@ -227,29 +228,28 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
         if new_symbols:
             cash_idx = symbols.index(lmidb.cash)
             symbols = symbols[:cash_idx] + new_symbols + symbols[cash_idx:]
-    positions = pd.DataFrame(index=dtie, columns=symbols)
+    positions = pd.DataFrame(index=period_dates, columns=symbols)
 
-    # initialize the end of positions datafrom with the latest position data
+    # initialize the end of positions dataframe with the latest position data
     positions[:] = 0.0
     for i, r in latest_position_df.iterrows():
-        positions.loc[dtie.iloc[-1], r["symbol"]] = r["quantity"]
+        positions.loc[period_dates.iloc[-1], r["symbol"]] = r["quantity"]
 
     cash = positions.columns[positions.columns.get_loc(lmidb.cash)]
 
-    short_term_gains = pd.DataFrame(index=dtie, columns=symbols)
+    short_term_gains = pd.DataFrame(index=period_dates, columns=symbols)
     short_term_gains[:] = 0.0
-    long_term_gains = pd.DataFrame(index=dtie, columns=symbols)
+    long_term_gains = pd.DataFrame(index=period_dates, columns=symbols)
     long_term_gains[:] = 0.0
-    income = pd.DataFrame(index=dtie, columns=symbols)
+    income = pd.DataFrame(index=period_dates, columns=symbols)
     income[:] = 0
-    mgmt_fees = pd.Series(index=dtie)
+    mgmt_fees = pd.Series(index=period_dates)
     mgmt_fees[:] = 0
-    distributions = pd.Series(index=dtie)
+    distributions = pd.Series(index=period_dates)
     distributions[:] = 0
-    for m in dtie[:0:-1]:
+    for m in period_dates[:0:-1]:
         som = dt.date(m.year, m.month, 1)
         month = som - dt.timedelta(days=1)
-        lp = len(positions)
         positions.loc[month] = positions.loc[m]  # type: ignore
 
         # Get transactions for the month after month, optionally filtered by ticker
@@ -401,47 +401,30 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
 
     # Compute cost basis forward in time (needs positions for quantity tracking)
     # Pass value DataFrame to avoid redundant database lookups
-    cost_basis = compute_cost_basis(cursor, account_id, symbols, positions, value)
+    cost_basis = compute_cost_basis(cursor, account_id, symbols, positions, value, args)
 
     # resample the history on the indicated interval
     if args.interval != "ME":
-        # Convert index to DatetimeIndex for resampling
-        positions_temp = positions.copy()
-        positions_temp.index = pd.to_datetime(positions_temp.index)
-        positions = positions_temp.resample(args.interval).last()
+        interval = args.interval
 
-        short_term_gains_temp = short_term_gains.copy()
-        short_term_gains_temp.index = pd.to_datetime(short_term_gains_temp.index)
-        short_term_gains = short_term_gains_temp.resample(args.interval).sum()
+        def _rs(df, agg):
+            d = df.copy()
+            d.index = pd.to_datetime(d.index)
+            return getattr(d.resample(interval), agg)()
 
-        long_term_gains_temp = long_term_gains.copy()
-        long_term_gains_temp.index = pd.to_datetime(long_term_gains_temp.index)
-        long_term_gains = long_term_gains_temp.resample(args.interval).sum()
-
-        income_temp = income.copy()
-        income_temp.index = pd.to_datetime(income_temp.index)
-        income = income_temp.resample(args.interval).sum()
-
-        mgmt_fees_temp = mgmt_fees.copy()
-        mgmt_fees_temp.index = pd.to_datetime(mgmt_fees_temp.index)
-        mgmt_fees = mgmt_fees_temp.resample(args.interval).sum()
-
-        distributions_temp = distributions.copy()
-        distributions_temp.index = pd.to_datetime(distributions_temp.index)
-        distributions = distributions_temp.resample(args.interval).sum()
-
-        cost_basis_temp = cost_basis.copy()
-        cost_basis_temp.index = pd.to_datetime(cost_basis_temp.index)
-        cost_basis = cost_basis_temp.resample(args.interval).last()
-
-        value_temp = value.copy()
-        value_temp.index = pd.to_datetime(value_temp.index)
-        value = value_temp.resample(args.interval).last()
+        positions = _rs(positions, "last")
+        short_term_gains = _rs(short_term_gains, "sum")
+        long_term_gains = _rs(long_term_gains, "sum")
+        income = _rs(income, "sum")
+        mgmt_fees = _rs(mgmt_fees, "sum")
+        distributions = _rs(distributions, "sum")
+        cost_basis = _rs(cost_basis, "last")
+        value = _rs(value, "last")
 
     if not args.all:
         # Only include securities still in account
-        lp = positions.iloc[-1]
-        lpi = lp[lp != 0].index
+        last_row = positions.iloc[-1]
+        lpi = last_row[last_row != 0].index
         positions = positions[lpi]
         short_term_gains = short_term_gains[lpi]
         long_term_gains = long_term_gains[lpi]
@@ -476,7 +459,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
     income["Total"] = income.sum(axis=1)
 
     # Compute cumulative ROI directly from pre-computed value and cost_basis
-    cumulative_roi = compute_cumulative_roi(value, cost_basis, income)
+    cumulative_roi = compute_cumulative_roi(value, cost_basis, income, args)
     history = {
         "positions": positions,
         "stg": short_term_gains,
@@ -499,6 +482,7 @@ def compute_cost_basis(
     symbols: list[str],
     positions: pd.DataFrame,
     value: pd.DataFrame,
+    args: argparse.Namespace,
 ) -> pd.DataFrame:
     """Compute cost basis forward in time using average-cost accounting; sells reduce basis proportionally.
 
@@ -508,13 +492,14 @@ def compute_cost_basis(
         symbols: Ordered list of ticker symbols (including cash) to track.
         positions: DataFrame of share quantities indexed by period-end date (from compute_history).
         value: Pre-computed market value DataFrame used to seed cost basis for pre-existing holdings.
+        args: Parsed CLI arguments.
     Returns:
         DataFrame of cost basis values with the same index and columns as positions.
     """
     if args.debug:
         print(f"Computing cost basis for account {account_id}")
-    dtie = positions.index
-    cost_basis = pd.DataFrame(index=dtie, columns=symbols)
+    period_dates = positions.index
+    cost_basis = pd.DataFrame(index=period_dates, columns=symbols)
     cost_basis[:] = 0.0
 
     # Get all transactions in chronological order (forward in time)
@@ -531,7 +516,7 @@ def compute_cost_basis(
 
     # Initialize cost basis for securities held at the start of the period
     # For these, we use the market value at the first month-end as initial cost basis
-    first_month_end = dtie[0]
+    first_month_end = period_dates[0]
     for symbol in symbols:
         qty_at_start = positions.loc[first_month_end, symbol]
         if qty_at_start > 0:  # type: ignore
@@ -545,7 +530,7 @@ def compute_cost_basis(
 
     transaction_idx = 0
 
-    for month_end in dtie:
+    for month_end in period_dates:
         # Process all transactions up to and including this month end
         while transaction_idx < len(transactions):
             t = transactions[transaction_idx]
@@ -559,7 +544,7 @@ def compute_cost_basis(
             quantity = float(t["Quantity"])
             price = float(t["price"])
 
-            # This is to handle the
+            # 9-char symbols are CUSIPs (fixed-income securities) with no candle data; use price=1
             if len(symbol) == 9:
                 price = 1
 
@@ -639,12 +624,12 @@ def compute_value(cursor: sqlite3.Cursor, symbols: list[str], positions: pd.Data
     Returns:
         DataFrame with the same index and columns as positions, containing dollar market values.
     """
-    dtie = positions.index
-    value = pd.DataFrame(index=dtie, columns=symbols)
+    period_dates = positions.index
+    value = pd.DataFrame(index=period_dates, columns=symbols)
     value[:] = 0.0
 
     # Calculate market value for each date
-    for date_idx in dtie:
+    for date_idx in period_dates:
         # Get closing prices for this date
         closings = lmidb.get_closing_values(cursor, list(symbols), date_idx)
 
@@ -661,6 +646,7 @@ def compute_cumulative_roi(
     value_df: pd.DataFrame,
     cost_basis_df: pd.DataFrame,
     income_df: pd.DataFrame,
+    args: argparse.Namespace,
 ) -> pd.DataFrame:
     """Compute cumulative ROI (%) as (value + cumulative_income - cost_basis) / cost_basis × 100.
 
@@ -668,6 +654,7 @@ def compute_cumulative_roi(
         value_df: Market value DataFrame indexed by period-end date (excludes cash and Total columns).
         cost_basis_df: Cost basis DataFrame with matching index and columns.
         income_df: Per-period income DataFrame (dividends, interest, etc.) with matching index and columns.
+        args: Parsed CLI arguments.
     Returns:
         DataFrame of ROI percentages with the same index; zero where cost basis is zero or None.
     """
@@ -752,11 +739,12 @@ def summary(all_history: dict) -> None:
         print(f"Total ROI: {total_roi:.2f}%")
 
 
-def cumulative_roi(all_history: dict) -> None:
+def cumulative_roi(all_history: dict, args: argparse.Namespace) -> None:
     """Print cumulative ROI (%) for each security; with --ticker shows a per-period detail table including price and cost basis.
 
     Args:
         all_history: Dict keyed by account name containing history dicts from compute_history().
+        args: Parsed CLI arguments.
     """
     for account, history in all_history.items():
         positions = history["positions"]
@@ -794,11 +782,12 @@ def cumulative_roi(all_history: dict) -> None:
         print("")
 
 
-def annual_roi(all_history: dict) -> None:
+def annual_roi(all_history: dict, args: argparse.Namespace) -> None:
     """Print annualized (CAGR) ROI (%) for each security, calculated from first date held to each period-end. most-recent row only unless -v.
 
     Args:
         all_history: Dict keyed by account name containing history dicts from compute_history().
+        args: Parsed CLI arguments.
     """
     for account, history in all_history.items():
         positions = history["positions"]
@@ -849,11 +838,12 @@ def fees(all_history: dict) -> None:
         print(f"{history["fees"]}\n")
 
 
-def full_report(all_history: dict) -> None:
+def full_report(all_history: dict, args: argparse.Namespace) -> None:
     """Print positions, cost basis, market value, income, and ROI for each account; most-recent row only unless -v.
 
     Args:
         all_history: Dict keyed by account name containing history dicts from compute_history().
+        args: Parsed CLI arguments.
     """
     for account, history in all_history.items():
         print(f"Full Report for: {account}")
@@ -978,7 +968,6 @@ def main(enable_profiling=False):
         default=True,
         help="Disable the Equities sum column in output tables.",
     )
-    global args
     args = parser.parse_args()
 
     pd.options.display.float_format = "{:.2f}".format
@@ -993,7 +982,6 @@ def main(enable_profiling=False):
         conn = sqlite3.connect(fn)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
-    global cursor
     raw_cursor = conn.cursor()
     cursor = ProfilingCursor(raw_cursor, enable_profiling=enable_profiling or args.debug)
 
@@ -1002,27 +990,24 @@ def main(enable_profiling=False):
     match args.action:
         case "annual-roi":
             args.all = True
-            annual_roi(all_history)
+            annual_roi(all_history, args)
         case "cost-basis":
             cost_basis(all_history)
         case "fees":
             fees(all_history)
         case "full":
-            full_report(all_history)
+            full_report(all_history, args)
         case "income":
             income(all_history)
         case "positions":
             show_positions(all_history)
         case "roi":
             args.all = True
-            cumulative_roi(all_history)
+            cumulative_roi(all_history, args)
         case "summary":
             summary(all_history)
         case "value":
             show_value(all_history)
-        case _:
-            print("inconcievable")
-
     end_time = time.perf_counter()
     total_time = end_time - start_time
 
