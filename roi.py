@@ -538,9 +538,9 @@ def compute_cost_basis(
             # This security was held before transaction data starts
             # Use market value at start as initial cost basis (from pre-computed value)
             initial_value = value.loc[first_month_end, symbol]
-            running_cost_basis[symbol] = initial_value
+            running_cost_basis[symbol] = initial_value  # type: ignore
             if args.ticker and symbol == args.ticker and args.debug:
-                price = initial_value / qty_at_start if qty_at_start > 0 else 0
+                price = initial_value / qty_at_start if qty_at_start > 0 else 0  # type: ignore
                 print(f"Initializing cost basis for {symbol}: {qty_at_start:.2f} shares @ ${price:.2f} = ${initial_value:.2f}")
 
     transaction_idx = 0
@@ -752,12 +752,10 @@ def summary(all_history: dict) -> None:
         print(f"Total ROI: {total_roi:.2f}%")
 
 
-@timeit
-def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
+def cumulative_roi(all_history: dict) -> None:
     """Print cumulative ROI (%) for each security; with --ticker shows a per-period detail table including price and cost basis.
 
     Args:
-        cursor: Database cursor used for closing price lookups when a single ticker is requested.
         all_history: Dict keyed by account name containing history dicts from compute_history().
     """
     for account, history in all_history.items():
@@ -767,26 +765,13 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
         roi_df = history["cumulative_roi"]
 
         if args.ticker:
-            # Create detailed view for single ticker
             ticker = args.ticker
 
             if ticker not in positions.columns:
                 continue
 
-            # Get closing prices for all periods
-            closing_prices = pd.Series(index=positions.index, dtype=float)
-            for date_idx in positions.index:
-                closings = lmidb.get_closing_values(cursor, [ticker], date_idx)
-                closing_prices[date_idx] = closings[ticker]
-
-            # Extract market value for the ticker from the value DataFrame
-            # Remove "Total" column if it exists
-            value_columns = [col for col in value_data.columns if col != "Total"]
-            if ticker in value_columns:
-                market_value = value_data[ticker]
-            else:
-                market_value = pd.Series(index=positions.index, dtype=float)
-                market_value[:] = 0.0
+            market_value = value_data[ticker] if ticker in value_data.columns else pd.Series(0.0, index=positions.index)
+            closing_prices = (market_value / positions[ticker]).replace([float("inf"), -float("inf")], 0.0).fillna(0.0)
 
             detail_df = pd.DataFrame(
                 {
@@ -798,10 +783,10 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
                 }
             )
             detail_df = detail_df[detail_df["Quantity"] != 0]
-            print(f"Account: {account} - Ticker: {ticker} cumulitive ROI (%)")
+            print(f"Account: {account} - Ticker: {ticker} cumulative ROI (%)")
             print(detail_df)
         else:
-            print(f"Account: {account} cumulitive ROI (%)")
+            print(f"Account: {account} cumulative ROI (%)")
             if args.verbosity > 0:
                 print(roi_df)
             else:
@@ -933,7 +918,7 @@ def main(enable_profiling=False):
         "full": full_report,
         "income": income,
         "positions": show_positions,
-        "roi": cumulitive_roi,
+        "roi": cumulative_roi,
         "summary": summary,
         "value": show_value,
     }
@@ -1030,7 +1015,7 @@ def main(enable_profiling=False):
             show_positions(all_history)
         case "roi":
             args.all = True
-            cumulitive_roi(cursor, all_history)  # type: ignore
+            cumulative_roi(all_history)
         case "summary":
             summary(all_history)
         case "value":
