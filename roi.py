@@ -460,16 +460,27 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
 
     # Compute cumulative ROI directly from pre-computed value and cost_basis
     cumulative_roi = compute_cumulative_roi(value, cost_basis, income, args)
+
+    # Apply date range filter after cumulative_roi so cumsum(income) uses the full history
+    def _clip(df):
+        idx = pd.DatetimeIndex(df.index)
+        mask = pd.Series(True, index=df.index)
+        if args.start_date:
+            mask &= idx >= pd.Timestamp(args.start_date)
+        if args.end_date:
+            mask &= idx <= pd.Timestamp(args.end_date)
+        return df[mask.values]
+
     history = {
-        "positions": positions,
-        "stg": short_term_gains,
-        "ltg": long_term_gains,
-        "income": income,
-        "fees": mgmt_fees,
-        "distributions": distributions,
-        "cost_basis": cost_basis,
-        "value": value,
-        "cumulative_roi": cumulative_roi,
+        "positions": _clip(positions),
+        "stg": _clip(short_term_gains),
+        "ltg": _clip(long_term_gains),
+        "income": _clip(income),
+        "fees": _clip(mgmt_fees),
+        "distributions": _clip(distributions),
+        "cost_basis": _clip(cost_basis),
+        "value": _clip(value),
+        "cumulative_roi": _clip(cumulative_roi),
     }
 
     return history
@@ -953,6 +964,20 @@ def main(enable_profiling=False):
         default=None,
         type=str,
         help="Focus on a specific ticker symbol. (default: show all securities)",
+    )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        type=dt.date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Only show periods on or after this date.",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        type=dt.date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Only show periods on or before this date.",
     )
     parser.add_argument(
         "action",
