@@ -809,119 +809,6 @@ def cumulitive_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
         print("")
 
 
-@timeit
-def interval_roi(cursor: sqlite3.Cursor, all_history: dict) -> None:
-    """Compute ROI for each interval period (since the previous period).
-    This shows the performance gain/loss for each discrete time period.
-    Uses cost basis changes and market value changes to calculate interval returns.
-    """
-    for account, history in all_history.items():
-        positions = history["positions"]
-        cost_basis_data = history["cost_basis"]
-        stg = history["stg"]
-        ltg = history["ltg"]
-        income_data = history["income"]
-        fees = history["fees"]
-        distributions = history["distributions"]
-
-        value_df = history["value"]
-        symbols = [s for s in value_df.columns if s not in (lmidb.cash, "Total")]
-
-        # Create interval ROI dataframe
-        interval_roi_df = pd.DataFrame(index=value_df.index, columns=symbols)
-        interval_roi_df[:] = 0.0
-
-        # Calculate ROI for each interval
-        for i in range(len(value_df.index)):
-            curr_date = value_df.index[i]
-
-            for symbol in symbols:
-                # Ending value and cost basis for this period
-                end_value = value_df.loc[curr_date, symbol]
-                end_cost_basis = cost_basis_data.loc[curr_date, symbol]
-
-                # Treat None/NaN as 0
-                if end_value is None or (isinstance(end_value, float) and pd.isna(end_value)):
-                    end_value = 0.0
-                if end_cost_basis is None or (isinstance(end_cost_basis, float) and pd.isna(end_cost_basis)):
-                    end_cost_basis = 0.0
-
-                if i == 0:
-                    # First period - use cost basis as the starting value
-                    if end_cost_basis != 0:
-                        interval_roi_df.loc[curr_date, symbol] = (end_value - end_cost_basis) / end_cost_basis * 100
-                    else:
-                        interval_roi_df.loc[curr_date, symbol] = 0.0
-                else:
-                    # Subsequent periods - compare to previous period
-                    prev_date = value_df.index[i - 1]
-
-                    # Starting value and cost basis for this period
-                    start_value = value_df.loc[prev_date, symbol]
-                    start_cost_basis = cost_basis_data.loc[prev_date, symbol]
-
-                    if start_value is None or (isinstance(start_value, float) and pd.isna(start_value)):
-                        start_value = 0.0
-                    if start_cost_basis is None or (isinstance(start_cost_basis, float) and pd.isna(start_cost_basis)):
-                        start_cost_basis = 0.0
-
-                    # Change in cost basis represents net investment/divestment during period
-                    cost_basis_change = end_cost_basis - start_cost_basis
-
-                    # For interval ROI, we want to measure the return on the capital at risk
-                    # at the beginning of the period
-                    # ROI = (End Value - Start Value - Cost Basis Change) / Start Value
-                    # The cost_basis_change accounts for:
-                    # - New purchases (increases CB)
-                    # - Sales (decreases CB)
-                    # - Reinvested income (already in CB)
-                    # - Distributions (already in CB)
-
-                    if start_value > 0 and cost_basis_change <= start_value:
-                        interval_roi_df.loc[curr_date, symbol] = (end_value - start_value - cost_basis_change) / start_value * 100
-                    elif end_cost_basis != 0:
-                        # Large capital injection or zero start: compare end value to end cost basis
-                        interval_roi_df.loc[curr_date, symbol] = (end_value - end_cost_basis) / end_cost_basis * 100
-                    elif end_value != 0:
-                        interval_roi_df.loc[curr_date, symbol] = float("inf")
-                    else:
-                        interval_roi_df.loc[curr_date, symbol] = 0.0
-
-        if args.ticker:
-            # Create detailed view for single ticker
-            ticker = args.ticker
-
-            if ticker not in positions.columns:
-                continue
-
-            # Get closing prices for all periods
-            closing_prices = pd.Series(index=positions.index, dtype=float)
-            for date_idx in positions.index:
-                closings = lmidb.get_closing_values(cursor, [ticker], date_idx)
-                closing_prices[date_idx] = closings[ticker]
-
-            # Total income is the sum of short-term gains, long-term gains, and income
-            total_income = stg[ticker] + ltg[ticker] + income_data[ticker]
-
-            detail_df = pd.DataFrame(
-                {
-                    "Quantity": positions[ticker],
-                    "Price": closing_prices,
-                    "Cost Basis": cost_basis_data[ticker],
-                    "Market Value": value_df[ticker],
-                    "Income": total_income,
-                    "ROI %": interval_roi_df[ticker],
-                }
-            )
-            detail_df = detail_df[detail_df["Quantity"] != 0]
-            print(f"Account: {account} - Ticker: {ticker} - interval ROI")
-            print(detail_df)
-        else:
-            print(f"Account: {account} Interval ROI (%)")
-            print(interval_roi_df)
-        print("")
-
-
 def annual_roi(all_history: dict) -> None:
     """Print annualized (CAGR) ROI (%) for each security, calculated from first date held to each period-end. most-recent row only unless -v.
 
@@ -1045,7 +932,6 @@ def main(enable_profiling=False):
         "fees": fees,
         "full": full_report,
         "income": income,
-        "interval-roi": interval_roi,
         "positions": show_positions,
         "roi": cumulitive_roi,
         "summary": summary,
@@ -1140,9 +1026,6 @@ def main(enable_profiling=False):
             full_report(all_history)
         case "income":
             income(all_history)
-        case "interval-roi":
-            args.all = True
-            interval_roi(cursor, all_history)  # type: ignore
         case "positions":
             show_positions(all_history)
         case "roi":
