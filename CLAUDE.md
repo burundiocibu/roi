@@ -50,7 +50,7 @@ Investment ROI tracking and analysis system for Schwab brokerage accounts. Impor
 
 **ROI Calculations**:
 - Cumulative ROI: Total return from initial investment to current period
-- Interval ROI: Return for each discrete time period (accounts for cash flows)
+- Annual ROI: CAGR from first date held to each period-end
 
 ## Common Development Commands
 
@@ -90,7 +90,6 @@ Generate reports:
 ./roi.py summary                     # First and last period values with total ROI
 ./roi.py full                        # Comprehensive report: positions, cost basis, value, income, ROI
 ./roi.py roi                         # Cumulative ROI for each security
-./roi.py interval-roi                # Period-over-period ROI
 ./roi.py annual-roi                  # Annualized (CAGR) ROI for each security
 ./roi.py value                       # Market values over time
 ./roi.py cost-basis                  # Cost basis over time
@@ -104,16 +103,35 @@ Options:
 - `--account <name>` - Filter to specific account(s), can be repeated
 - `--ticker <symbol>` - Focus on specific ticker (shows detailed transaction log)
 - `--all` - Include all securities ever held (default: only currently held)
+- `--start-date YYYY-MM-DD` - Only show periods on or after this date
+- `--end-date YYYY-MM-DD` - Only show periods on or before this date
 - `-d, --debug` - Enable debug output and query profiling
 - `-v, --verbosity` - Increase output verbosity (e.g. `roi` shows only latest row by default, full history with `-v`)
 
 ### Testing
 
-Run tests:
+The test suite uses pytest with regression tests that compare computed output against stored CSV fixtures.
+
+Run all regression tests:
 ```bash
-python -m pytest tests/
-python -m pytest tests/test_lmidb.py -v
+uv run pytest tests/test_regression.py -v
 ```
+
+Regenerate fixtures after an intentional change (adopts current output as the new baseline):
+```bash
+uv run pytest tests/test_regression.py --update-fixtures
+```
+
+**How regression tests work:**
+- Tests call `compute_all_history` directly (no subprocess) against the real `lmi.db`
+- `--start-date` / `--end-date` pin each test to a stable historical window so new data doesn't invalidate tests
+- Expected values are stored as CSV files in `tests/fixtures/` (committed to the repo)
+- `tests/conftest.py` provides the shared `db_cursor` fixture and `make_args()` helper for constructing `argparse.Namespace` objects
+
+**Adding a new test case:**
+1. Add a fixture function and test class to `tests/test_regression.py` (follow the `TestJonIraH22025` pattern)
+2. Run `pytest --update-fixtures` once to generate the CSV fixtures
+3. Verify the fixture values look correct, then commit both the test and the fixtures
 
 ### Profiling
 
@@ -145,7 +163,7 @@ This shows:
 ## Important Implementation Notes
 
 - **Cash handling**: Cash is tracked as a special ticker with symbol `lmidb.cash` (string "cash")
-- **Transaction actions**: 40+ action types (Buy, Sell, Dividend, etc.) - see roi.py lines 442-533 for complete handling
+- **Transaction actions**: 40+ action types (Buy, Sell, Dividend, etc.) - see the `match action:` block in `compute_history` in roi.py
 - **Candles cache**: Global `_candles_cache` dict with NumPy arrays for fast lookups - critical for performance
 - **Cost basis edge cases**:
   - Journaled shares and security transfers with price=0 use the candle closing price at the transaction date
