@@ -95,7 +95,24 @@ Generate reports:
 ./roi.py cost-basis                  # Cost basis over time
 ./roi.py positions                   # Quantity positions over time
 ./roi.py income                      # Income (dividends, interest, gains) over time
+./roi.py export                      # JSON snapshot of current balances/cost basis to stdout (for rcfm)
 ```
+
+The `export` command outputs JSON to stdout with this shape:
+```json
+{
+  "as_of": "YYYY-MM-DD",
+  "accounts": {
+    "jon_ira":   { "as_of": "...", "value": 0.0, "cost_basis": 0.0, "unrealized_gain": 0.0 },
+    "deb_ira":   { ... },
+    "jon_roth":  { ... },
+    "deb_roth":  { ... },
+    "joint_inv": { ... },
+    "deb_inv":   { ... }
+  }
+}
+```
+Account names use underscores to match rcfm's account naming convention. `value` is current market value; `cost_basis` is tracked investment cost (meaningful for taxable accounts; for IRAs the full `value` is taxable on withdrawal regardless). Pipe to `jq` to inspect, or consume via `subprocess.run(["./roi.py", "export"])` from rcfm.
 
 Options:
 - `--database lmi.db` - Database file (default: lmi.db)

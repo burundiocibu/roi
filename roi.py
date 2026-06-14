@@ -902,6 +902,31 @@ def full_report(all_history: dict, args: argparse.Namespace) -> None:
                 print(f"\nROI (%)\n{roi_df.iloc[-1].to_frame().T}\n")
 
 
+def export(all_history: dict) -> None:
+    """Export current account balances, cost basis, and unrealized gains as JSON to stdout."""
+    import json
+
+    result = {}
+    as_of = None
+    for account, history in all_history.items():
+        value_df = history["value"]
+        cost_basis_df = history["cost_basis"]
+        last_date = value_df.index[-1]
+        if as_of is None or last_date > as_of:
+            as_of = last_date
+        value_total = float(value_df["Total"].iloc[-1])
+        cost_basis_total = float(cost_basis_df["Total"].iloc[-1])
+        cf_name = account.replace("-", "_")
+        result[cf_name] = {
+            "as_of": last_date.strftime("%Y-%m-%d"),
+            "value": round(value_total, 2),
+            "cost_basis": round(cost_basis_total, 2),
+            "unrealized_gain": round(value_total - cost_basis_total, 2),
+        }
+
+    print(json.dumps({"as_of": as_of.strftime("%Y-%m-%d"), "accounts": result}, indent=2))
+
+
 def main(enable_profiling=False):
     """Parse CLI arguments, open the database, compute history for all matching accounts, and dispatch to the requested report.
 
@@ -916,6 +941,7 @@ def main(enable_profiling=False):
     action_funcs = {
         "annual-roi": annual_roi,
         "cost-basis": cost_basis,
+        "export": export,
         "fees": fees,
         "full": full_report,
         "income": income,
@@ -1019,6 +1045,8 @@ def main(enable_profiling=False):
             annual_roi(all_history, args)
         case "cost-basis":
             cost_basis(all_history)
+        case "export":
+            export(all_history)
         case "fees":
             fees(all_history)
         case "full":
