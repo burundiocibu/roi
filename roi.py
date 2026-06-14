@@ -10,6 +10,7 @@ import pandas as pd
 from pathlib import Path
 import pstats
 import sqlite3
+from typing import Any, cast
 import time
 
 import lmidb
@@ -235,7 +236,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
     for i, r in latest_position_df.iterrows():
         positions.loc[period_dates.iloc[-1], r["symbol"]] = r["quantity"]
 
-    cash = positions.columns[positions.columns.get_loc(lmidb.cash)]
+    cash = cast(str, positions.columns[positions.columns.get_loc(lmidb.cash)])
 
     short_term_gains = pd.DataFrame(index=period_dates, columns=symbols)
     short_term_gains[:] = 0.0
@@ -249,7 +250,7 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
     distributions[:] = 0
     for m in period_dates[:0:-1]:
         som = dt.date(m.year, m.month, 1)
-        month = som - dt.timedelta(days=1)
+        month = cast(Any, som - dt.timedelta(days=1))
         positions.loc[month] = positions.loc[m]  # type: ignore
 
         # Get transactions for the month after month, optionally filtered by ticker
@@ -294,96 +295,96 @@ def compute_history(cursor: sqlite3.Cursor, account_id: int, equity_tickers: set
             match action:
                 case "Advisor Fee" | "ADR Mgmt Fee" | "ADR Mgmt Fee Adj":
                     # these are negative to start with
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    mgmt_fees[month] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    mgmt_fees[month] -= amount
                 case "Advisor Fee Adj":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    mgmt_fees[month] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    mgmt_fees[month] -= amount
                 case "Bank Interest" | "Cash In Lieu":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, cash] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, cash] = cast(float, short_term_gains.loc[month, cash]) + amount
                 case "Bond Interest":
-                    positions.loc[month, cash] += amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) + amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
+                    income.loc[month, symbol] = cast(float, income.loc[month, symbol]) + amount
                 case "Buy":
-                    positions.loc[month, symbol] -= quantity  # type: ignore
-                    positions.loc[month, cash] -= amount  # type: ignore
+                    positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - quantity
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
                 case "Cash Dividend" | "Non-Qualified Div":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
+                    income.loc[month, symbol] = cast(float, income.loc[month, symbol]) + amount
                 case "Div Adj" | "Dividend Adj" | "Div Adjustment":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
+                    income.loc[month, symbol] = cast(float, income.loc[month, symbol]) + amount
                 case "Foreign Tax Paid" | "Foreign Tax Reclaim Adj":
-                    positions.loc[month, cash] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
                 case "Full Redemption":
-                    positions.loc[month, symbol] -= amount  # type: ignore
+                    positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - amount
                 case "Full Redemption Adj" | "CXL Redemption Adj" | "Final Cash Liquid":
-                    positions.loc[month, cash] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
                 case "Redemption Adj" | "Final Cash Liquid Adj":
-                    positions.loc[month, symbol] -= quantity  # type: ignore
+                    positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - quantity
                 case "Funds Received":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    distributions.loc[month] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    distributions.loc[month] -= amount
                 case "Journal" | "Journaled Shares":
-                    positions.loc[month, cash] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
                     if symbol != "":
-                        positions.loc[month, symbol] -= quantity  # type: ignore
+                        positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - quantity
                 case "Long Term Cap Gain":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    long_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    long_term_gains.loc[month, symbol] = cast(float, long_term_gains.loc[month, symbol]) + amount
+                    income.loc[month, symbol] = cast(float, income.loc[month, symbol]) + amount
                 case "Long Term Cap Gain Reinvest":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    long_term_gains.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    long_term_gains.loc[month, symbol] = cast(float, long_term_gains.loc[month, symbol]) + amount
                 case "MoneyLink Transfer":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    distributions[month] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    distributions[month] -= amount
                 case "Pr Yr Cash Div":
-                    positions.loc[month, cash] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
                 case "Qualified Dividend" | "Special Qual Div":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    long_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    long_term_gains.loc[month, symbol] = cast(float, long_term_gains.loc[month, symbol]) + amount
+                    income.loc[month, symbol] = cast(float, income.loc[month, symbol]) + amount
                 case "Reinvest Dividend":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
                 case "Reinvest Shares":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    positions.loc[month, symbol] -= quantity  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - quantity
                 case "Reinvestment Adj":
-                    positions.loc[month, symbol] -= quantity  # type: ignore
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - quantity
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
                 case "Security Transfer":
-                    positions.loc[month, cash] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
                     if symbol != "":
-                        positions.loc[month, symbol] -= quantity  # type: ignore
+                        positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - quantity
                 case "Sell":
-                    positions.loc[month, symbol] += quantity  # type: ignore
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    long_term_gains.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) + quantity
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    long_term_gains.loc[month, symbol] = cast(float, long_term_gains.loc[month, symbol]) + amount
                 case "Short Term Cap Gain":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
+                    income.loc[month, symbol] = cast(float, income.loc[month, symbol]) + amount
                 case "Short Term Cap Gain Reinvest":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
                 case "Special Dividend":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    short_term_gains.loc[month, symbol] += amount  # type: ignore
-                    income.loc[month, symbol] += amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    short_term_gains.loc[month, symbol] = cast(float, short_term_gains.loc[month, symbol]) + amount
+                    income.loc[month, symbol] = cast(float, income.loc[month, symbol]) + amount
                 case "Stock Split" | "Stock Merger":
-                    positions.loc[month, symbol] -= quantity  # type: ignore
+                    positions.loc[month, symbol] = cast(float, positions.loc[month, symbol]) - quantity
                     # For stock splits, cost basis total remains same
                     # but we need to track the quantity change
                 case "Wire Sent":
-                    positions.loc[month, cash] -= amount  # type: ignore
-                    distributions[month] -= amount  # type: ignore
+                    positions.loc[month, cash] = cast(float, positions.loc[month, cash]) - amount
+                    distributions[month] -= amount
                 case _:
                     print(
                         f"Unhandled action in {account_name}, {tdate}: A:{action}, S:{symbol}, Q:{quantity}, A:{amount}, F:{fees}, P:{price}"
