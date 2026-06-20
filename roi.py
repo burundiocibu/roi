@@ -902,26 +902,35 @@ def full_report(all_history: dict, args: argparse.Namespace) -> None:
                 print(f"\nROI (%)\n{roi_df.iloc[-1].to_frame().T}\n")
 
 
-def export(all_history: dict) -> None:
-    """Export current account balances, cost basis, and unrealized gains as JSON to stdout."""
+def export(cursor: sqlite3.Cursor, args: argparse.Namespace) -> None:
+    """Export current account balances as JSON to stdout, reading the latest positions snapshot directly (no history computation)."""
     import json
+
+    account_filters = args.account
+    if account_filters:
+        placeholders = ",".join("?" * len(account_filters))
+        cursor.execute(f"SELECT id, name FROM accounts WHERE name IN ({placeholders})", account_filters)
+    else:
+        cursor.execute("SELECT id, name FROM accounts")
+    accounts = cursor.fetchall()
 
     result = {}
     as_of = None
-    for account, history in all_history.items():
-        value_df = history["value"]
-        cost_basis_df = history["cost_basis"]
-        last_date = value_df.index[-1]
+    for account in accounts:
+        table_name = f"positions_{account['id']}"
+        cursor.execute(
+            f"SELECT date, SUM(value) FROM {table_name} WHERE date = (SELECT MAX(date) FROM {table_name})"
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] is None:
+            continue
+        last_date = dt.datetime.fromisoformat(row[0]).date()
         if as_of is None or last_date > as_of:
             as_of = last_date
-        value_total = float(value_df["Total"].iloc[-1])
-        cost_basis_total = float(cost_basis_df["Total"].iloc[-1])
-        cf_name = account.replace("-", "_")
+        cf_name = account["name"].replace("-", "_")
         result[cf_name] = {
             "as_of": last_date.strftime("%Y-%m-%d"),
-            "value": round(value_total, 2),
-            "cost_basis": round(cost_basis_total, 2),
-            "unrealized_gain": round(value_total - cost_basis_total, 2),
+            "value": round(float(row[1]), 2),
         }
 
     print(json.dumps({"as_of": as_of.strftime("%Y-%m-%d"), "accounts": result}, indent=2))
@@ -1037,6 +1046,24 @@ def main(enable_profiling=False):
     raw_cursor = conn.cursor()
     cursor = ProfilingCursor(raw_cursor, enable_profiling=enable_profiling or args.debug)
 
+    if args.action == "export":
+        export(cursor, args)
+        end_time = time.perf_counter()
+        if isinstance(cursor, ProfilingCursor):
+            cursor.print_stats()
+        if enable_profiling:
+            print(f"\n[TOTAL EXECUTION TIME] {end_time - start_time:.4f} seconds")
+            profiler.disable()
+            s = io.StringIO()
+            stats = pstats.Stats(profiler, stream=s)
+            stats.sort_stats(pstats.SortKey.CUMULATIVE)
+            stats.print_stats(30)
+            print("\n" + "=" * 80)
+            print("PROFILING RESULTS (Top 30 by cumulative time)")
+            print("=" * 80)
+            print(s.getvalue())
+        return
+
     all_history = compute_all_history(cursor, args)  # type: ignore
 
     match args.action:
@@ -1045,8 +1072,6 @@ def main(enable_profiling=False):
             annual_roi(all_history, args)
         case "cost-basis":
             cost_basis(all_history)
-        case "export":
-            export(all_history)
         case "fees":
             fees(all_history)
         case "full":
