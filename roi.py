@@ -670,8 +670,6 @@ def compute_cumulative_roi(
     Returns:
         DataFrame of ROI percentages with the same index; zero where cost basis is zero or None.
     """
-    if args.debug:
-        print(f"compute_cumulative_roi")
     symbols = [c for c in value_df.columns if c not in (lmidb.cash, "Total")]
     roi_df = pd.DataFrame(index=value_df.index, columns=symbols, dtype=float)
     roi_df[:] = 0.0
@@ -714,14 +712,24 @@ def show_value(all_history: dict) -> None:
         print(f"Market value for {account}:\n{history['value']}")
 
 
-def income(all_history: dict) -> None:
+def income(all_history: dict, args: argparse.Namespace) -> None:
     """Print the income (dividends, interest, capital gains distributions) DataFrame for each account.
+
+    Shows the full per-period, per-symbol breakdown with -v; otherwise each security's income summed
+    over all time.
 
     Args:
         all_history: Dict keyed by account name containing history dicts from compute_history().
+        args: Parsed CLI arguments.
     """
     for account, history in all_history.items():
-        print(f"Income for {account}:\n{history['income']}")
+        income_data = history["income"]
+        if args.verbosity > 0:
+            print(f"Income for {account}:\n{income_data}")
+        else:
+            totals = income_data.sum().to_frame().T
+            totals.index = ["Total"]
+            print(f"Income for {account}:\n{totals}")
 
 
 def summary(all_history: dict) -> None:
@@ -918,9 +926,7 @@ def export(cursor: sqlite3.Cursor, args: argparse.Namespace) -> None:
     as_of = None
     for account in accounts:
         table_name = f"positions_{account['id']}"
-        cursor.execute(
-            f"SELECT date, SUM(value) FROM {table_name} WHERE date = (SELECT MAX(date) FROM {table_name})"
-        )
+        cursor.execute(f"SELECT date, SUM(value) FROM {table_name} WHERE date = (SELECT MAX(date) FROM {table_name})")
         row = cursor.fetchone()
         if row is None or row[0] is None:
             continue
@@ -1077,7 +1083,7 @@ def main(enable_profiling=False):
         case "full":
             full_report(all_history, args)
         case "income":
-            income(all_history)
+            income(all_history, args)
         case "positions":
             show_positions(all_history)
         case "roi":
